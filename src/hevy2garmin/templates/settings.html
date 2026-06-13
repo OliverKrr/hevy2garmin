@@ -172,9 +172,26 @@
             </label>
         </div>
         <p class="section-description">
-            When you start a <strong>Strength Training</strong> activity on your Garmin watch at the gym, hevy2garmin will detect it and push your Hevy exercise data into that activity instead of creating a new one.
+            When you start a <strong>Strength Training</strong> activity on your Garmin watch at the gym, hevy2garmin will detect it and combine your Hevy exercise data with that activity instead of creating a new one.
             You get 1-second HR sampling, training effect, EPOC, and recovery data. If no matching watch activity is found, it falls back to the normal upload.
         </p>
+        <div class="form-group" style="margin-top: 12px;">
+            <label class="form-label" for="merge_strategy">Merge strategy</label>
+            <select class="form-select" id="merge_strategy" name="merge_strategy">
+                <option value="exercise_sets" {{ 'selected' if config.get('merge_strategy', 'exercise_sets') == 'exercise_sets' }}>Exercise Sets API — non-destructive (default)</option>
+                <option value="fit_replace" {{ 'selected' if config.get('merge_strategy', 'exercise_sets') == 'fit_replace' }}>FIT Replace — regenerate &amp; replace activity</option>
+            </select>
+            <div class="form-hint">
+                <strong>Exercise Sets API</strong> pushes Hevy sets onto the watch activity via Garmin's API, keeping its HR, training effect and EPOC untouched.
+                <strong>FIT Replace</strong> regenerates a fresh FIT (watch HR + Hevy exercises), uploads it and deletes the original — exercise names render reliably, but the activity is replaced.
+            </div>
+        </div>
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 12px;">
+            <input type="hidden" name="merge_delete_original" value="off">
+            <input type="checkbox" name="merge_delete_original" value="on" {{ 'checked' if config.get('merge_delete_original', True) }} style="width: 18px; height: 18px; accent-color: var(--accent);">
+            <span style="font-size: 13px; color: var(--text-secondary);">Delete original watch activity after FIT Replace</span>
+        </label>
+        <div class="form-hint">Only applies to <strong>FIT Replace</strong>. Turn off to keep both activities and merge them manually in Garmin Connect.</div>
     </div>
 
     <!-- Activity Description Section -->

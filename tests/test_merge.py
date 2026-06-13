@@ -1,7 +1,8 @@
-"""Tests for merge mode: matching heuristic + payload builder."""
+"""Tests for merge mode: matching heuristic, payload builder, and strategies."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -354,6 +355,291 @@ class TestAttemptMerge:
         result = attempt_merge(MagicMock(), HEVY_WORKOUT, mock_db)
         assert result.merged is False
         assert "Circuit breaker" in result.fallback_reason
+
+
+# ---------------------------------------------------------------------------
+# Strategy dispatch: attempt_merge routes on config["merge_strategy"]
+# ---------------------------------------------------------------------------
+
+class TestMergeStrategyDispatch:
+    """attempt_merge picks the path named by config['merge_strategy']."""
+
+    def setup_method(self):
+        reset_circuit_breaker()
+
+    @patch("hevy2garmin.merge.load_config")
+    @patch("hevy2garmin.merge.find_matching_garmin_activity")
+    @patch("hevy2garmin.merge.get_activity_exercise_sets")
+    @patch("hevy2garmin.merge.push_exercise_sets")
+    @patch("hevy2garmin.merge.rename_activity")
+    @patch("hevy2garmin.merge.set_description")
+    @patch("hevy2garmin.merge.download_activity_fit")
+    def test_default_routes_to_exercise_sets(self, mock_dl, mock_desc, mock_rename, mock_push, mock_get_sets, mock_find, mock_cfg):
+        """No merge_strategy in config → exercise_sets path (PUT), never the FIT path."""
+        mock_cfg.return_value = {}  # absent key → default "exercise_sets"
+        mock_find.return_value = _make_garmin_activity()
+        mock_get_sets.return_value = {"exerciseSets": []}
+
+        result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+        assert result.merged is True
+        mock_push.assert_called_once()
+        mock_dl.assert_not_called()
+
+    @patch("hevy2garmin.merge.load_config")
+    @patch("hevy2garmin.merge.find_matching_garmin_activity")
+    @patch("hevy2garmin.merge.push_exercise_sets")
+    @patch("hevy2garmin.merge.download_activity_fit")
+    @patch("hevy2garmin.merge.extract_hr_samples")
+    @patch("hevy2garmin.merge.generate_fit")
+    @patch("hevy2garmin.merge.upload_fit")
+    @patch("hevy2garmin.merge.rename_activity")
+    @patch("hevy2garmin.merge.set_description")
+    @patch("hevy2garmin.merge.delete_activity")
+    def test_fit_replace_routes_to_fit_path(self, mock_del, mock_desc, mock_rename, mock_upload, mock_gen, mock_extract, mock_dl, mock_push, mock_find, mock_cfg):
+        """merge_strategy=fit_replace → FIT upload path, never the exerciseSets PUT."""
+        mock_cfg.return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+        mock_find.return_value = _make_garmin_activity()
+        mock_dl.return_value = b"fit"
+        mock_extract.return_value = [120]
+        mock_gen.return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 120}
+        mock_upload.return_value = {"activity_id": 42}
+
+        result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+        assert result.merged is True
+        assert result.activity_id == 42
+        mock_upload.assert_called_once()
+        mock_push.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# HR round-trip: extract_hr_samples reads back what generate_fit wrote
+# ---------------------------------------------------------------------------
+
+class TestExtractHrSamples:
+    """Round-trip: write a FIT with known HR, read it back via the extractor."""
+
+    def test_round_trip(self, sample_profile: dict, tmp_path: Path) -> None:
+        from hevy2garmin.fit import generate_fit
+        from hevy2garmin.garmin import extract_hr_samples
+
+        workout = {
+            "id": "hr-rt",
+            "title": "HR Round Trip",
+            "start_time": "2026-04-01T20:00:00+00:00",
+            "end_time": "2026-04-01T20:30:00+00:00",
+            "exercises": [{
+                "index": 0, "title": "Bench Press (Barbell)", "exercise_template_id": "X",
+                "sets": [{"type": "normal", "weight_kg": 60, "reps": 8}],
+            }],
+        }
+        hr_in = [110, 112, 115, 118, 120, 119, 117, 115, 113, 110]
+        fit_path = tmp_path / "rt.fit"
+        generate_fit(workout, hr_samples=hr_in, output_path=str(fit_path), profile=sample_profile)
+
+        hr_out = extract_hr_samples(fit_path.read_bytes())
+        assert hr_out == hr_in, f"Round-trip mismatch: in={hr_in} out={hr_out}"
+
+    def test_no_hr_records_returns_empty(self, sample_profile: dict, tmp_path: Path) -> None:
+        """FIT generated with hr_samples=None has zero RecordMessage HR → extractor returns []."""
+        from hevy2garmin.fit import generate_fit
+        from hevy2garmin.garmin import extract_hr_samples
+
+        workout = {
+            "id": "no-hr",
+            "title": "No HR",
+            "start_time": "2026-04-01T20:00:00+00:00",
+            "end_time": "2026-04-01T20:30:00+00:00",
+            "exercises": [{
+                "index": 0, "title": "Bench Press (Barbell)", "exercise_template_id": "X",
+                "sets": [{"type": "normal", "weight_kg": 60, "reps": 8}],
+            }],
+        }
+        fit_path = tmp_path / "no-hr.fit"
+        generate_fit(workout, hr_samples=None, output_path=str(fit_path), profile=sample_profile)
+
+        assert extract_hr_samples(fit_path.read_bytes()) == []
+
+
+# ---------------------------------------------------------------------------
+# Strategy: fit_replace end-to-end (mocked I/O)
+# ---------------------------------------------------------------------------
+
+class TestFitReplaceMerge:
+    """End-to-end attempt_merge with the FIT-replace strategy (mocked I/O)."""
+
+    def setup_method(self):
+        reset_circuit_breaker()
+
+    def _patches(self):
+        """Common patch stack for attempt_merge tests."""
+        return {
+            "find": patch("hevy2garmin.merge.find_matching_garmin_activity"),
+            "download": patch("hevy2garmin.merge.download_activity_fit"),
+            "extract": patch("hevy2garmin.merge.extract_hr_samples"),
+            "generate": patch("hevy2garmin.merge.generate_fit"),
+            "upload": patch("hevy2garmin.merge.upload_fit"),
+            "rename": patch("hevy2garmin.merge.rename_activity"),
+            "set_desc": patch("hevy2garmin.merge.set_description"),
+            "delete": patch("hevy2garmin.merge.delete_activity"),
+            "load_cfg": patch("hevy2garmin.merge.load_config"),
+        }
+
+    def test_calls_in_order_with_delete_default(self):
+        """Match → download → extract → generate → upload → rename → set_desc → delete."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].return_value = b"fake-fit-bytes"
+            mocks["extract"].return_value = [120, 121, 122]
+            mocks["generate"].return_value = {"exercises": 2, "total_sets": 5, "calories": 200, "avg_hr": 121}
+            mocks["upload"].return_value = {"activity_id": 99999}
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert result.merged is True
+            assert result.activity_id == 99999
+            mocks["download"].assert_called_once()
+            mocks["extract"].assert_called_once_with(b"fake-fit-bytes")
+            mocks["generate"].assert_called_once()
+            # generate_fit was called with hr_samples = the extracted list
+            assert mocks["generate"].call_args.kwargs.get("hr_samples") == [120, 121, 122]
+            mocks["upload"].assert_called_once()
+            mocks["rename"].assert_called_once()
+            mocks["set_desc"].assert_called_once()
+            mocks["delete"].assert_called_once_with(mocks["delete"].call_args.args[0], 12345)
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_keeps_original_when_flag_off(self):
+        """merge_delete_original=False → delete_activity is NOT called."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].return_value = b"fake"
+            mocks["extract"].return_value = [120]
+            mocks["generate"].return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 120}
+            mocks["upload"].return_value = {"activity_id": 88888}
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": False}
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert result.merged is True
+            assert result.activity_id == 88888
+            mocks["delete"].assert_not_called()
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_falls_back_to_no_hr_on_download_error(self):
+        """download_activity_fit raises → generate_fit called with hr_samples=None."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].side_effect = RuntimeError("network down")
+            mocks["generate"].return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 90}
+            mocks["upload"].return_value = {"activity_id": 77777}
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert result.merged is True
+            mocks["extract"].assert_not_called()  # download blew up before extract
+            assert mocks["generate"].call_args.kwargs.get("hr_samples") is None
+            mocks["upload"].assert_called_once()
+            mocks["delete"].assert_called_once()
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_empty_hr_samples_passed_as_none(self):
+        """extract_hr_samples returns [] → generate_fit called with hr_samples=None."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].return_value = b"fake"
+            mocks["extract"].return_value = []
+            mocks["generate"].return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 90}
+            mocks["upload"].return_value = {"activity_id": 66666}
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+
+            attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert mocks["generate"].call_args.kwargs.get("hr_samples") is None
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_returns_merged_even_if_delete_fails(self):
+        """delete_activity raises → still merged=True; both activities exist."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].return_value = b"fake"
+            mocks["extract"].return_value = [120]
+            mocks["generate"].return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 120}
+            mocks["upload"].return_value = {"activity_id": 55555}
+            mocks["delete"].side_effect = RuntimeError("delete API down")
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert result.merged is True
+            assert result.activity_id == 55555
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_no_match_returns_fallback(self):
+        """find_matching_garmin_activity returns None → no upload/delete attempted."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = None
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace"}
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            assert result.merged is False
+            assert result.fallback_reason is not None
+            assert "No matching" in result.fallback_reason
+            mocks["download"].assert_not_called()
+            mocks["upload"].assert_not_called()
+            mocks["delete"].assert_not_called()
+        finally:
+            for p in ps.values():
+                p.stop()
+
+    def test_circuit_breaker_trips_after_upload_failures(self):
+        """3 consecutive upload failures → 4th call is short-circuited."""
+        ps = self._patches()
+        mocks = {k: p.start() for k, p in ps.items()}
+        try:
+            mocks["find"].return_value = _make_garmin_activity()
+            mocks["download"].return_value = b"fake"
+            mocks["extract"].return_value = [120]
+            mocks["generate"].return_value = {"exercises": 1, "total_sets": 1, "calories": 50, "avg_hr": 120}
+            mocks["upload"].side_effect = RuntimeError("upload failed")
+            mocks["load_cfg"].return_value = {"merge_strategy": "fit_replace", "merge_delete_original": True}
+
+            for _ in range(3):
+                attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+
+            result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+            assert result.merged is False
+            assert result.fallback_reason is not None
+            assert "Circuit breaker" in result.fallback_reason
+        finally:
+            for p in ps.values():
+                p.stop()
 
 
 # ---------------------------------------------------------------------------
