@@ -125,6 +125,7 @@
 
 <script>
 const GARMIN_WORKER_BASE = 'https://hevy2garmin-exchange-di.gkos.workers.dev';
+const DIRECT_LOGIN = {{ direct_garmin_login | default(false) | tojson }};
 
 // ── Garmin inline login (preferred UX, no copy-paste) ──────────────────────
 
@@ -142,7 +143,8 @@ async function garminConnect() {
     btn.disabled = true;
     result.innerHTML = '<span style="color: var(--text-muted);">Connecting to Garmin...</span>';
     try {
-        const resp = await fetch(GARMIN_WORKER_BASE + '/login', {
+        const url = DIRECT_LOGIN ? '/api/garmin-login' : (GARMIN_WORKER_BASE + '/login');
+        const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: email, password: password }),
@@ -171,10 +173,14 @@ async function garminSubmitMfa() {
     btn.disabled = true;
     result.innerHTML = '<span style="color: var(--text-muted);">Verifying code...</span>';
     try {
-        const resp = await fetch(GARMIN_WORKER_BASE + '/login-mfa', {
+        const url = DIRECT_LOGIN ? '/api/garmin-login-mfa' : (GARMIN_WORKER_BASE + '/login-mfa');
+        const body = DIRECT_LOGIN
+            ? { session_id: garminMfaSessionId, code: code }
+            : { session_id: garminMfaSessionId, mfa_code: code };
+        const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: garminMfaSessionId, mfa_code: code }),
+            body: JSON.stringify(body),
         });
         const data = await resp.json();
         await handleGarminLoginResponse(data);
@@ -193,6 +199,11 @@ async function handleGarminLoginResponse(data) {
         // Hide MFA row if it was shown
         mfaRow.style.display = 'none';
         garminMfaSessionId = null;
+        if (DIRECT_LOGIN) {
+            // Direct (Pi) login already persisted tokens server-side — nothing to store.
+            result.innerHTML = '<span style="color: var(--accent);">&#10003; Connected to Garmin</span>';
+            return;
+        }
         // Persist tokens on our server
         const storeResp = await fetch('/api/garmin-ticket', {
             method: 'POST',
@@ -245,14 +256,14 @@ async function handleGarminLoginResponse(data) {
         // manual sign-in UI so the user can complete setup via their browser.
         const detail = data.message || 'Garmin requires the browser sign-in flow for this account.';
         result.innerHTML = '<span style="color: var(--text-secondary); font-size: 11px;">&#9888; ' + detail + ' Use the manual sign-in below:</span>';
-        revealManualFallback();
+        if (!DIRECT_LOGIN) revealManualFallback();
         return;
     }
 
     // Unknown / error status — reveal the manual fallback so the user has a path forward.
     const msg = (data && (data.message || data.error)) || 'Unexpected error';
     result.innerHTML = '<span style="color: var(--red);">&#10007; ' + msg + '. Try the manual sign-in below.</span>';
-    revealManualFallback();
+    if (!DIRECT_LOGIN) revealManualFallback();
 }
 
 function revealManualFallback() {

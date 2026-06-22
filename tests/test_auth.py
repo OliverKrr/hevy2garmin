@@ -225,3 +225,23 @@ class TestGarminLoginEndpoints:
             )
         comp.assert_called_once_with("sid-1", "123456")
         assert resp.json()["status"] == "success"
+
+
+@pytest.fixture
+def client_direct_login():
+    """TestClient with the direct-login flag on (and no HEVY2GARMIN_SECRET)."""
+    with patch.dict(os.environ, {"H2G_DIRECT_GARMIN_LOGIN": "true"}, clear=False):
+        os.environ.pop("HEVY2GARMIN_SECRET", None)
+        from hevy2garmin.server import app
+        yield TestClient(app)
+
+
+class TestDirectLoginFlag:
+    def test_setup_renders_direct_flag_on(self, client_direct_login) -> None:
+        resp = client_direct_login.get("/setup")
+        assert "const DIRECT_LOGIN = true" in resp.text
+        assert "/api/garmin-login" in resp.text
+
+    def test_setup_renders_direct_flag_off(self, client_no_secret) -> None:
+        resp = client_no_secret.get("/setup")
+        assert "const DIRECT_LOGIN = false" in resp.text
