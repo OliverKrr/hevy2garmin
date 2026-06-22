@@ -6,6 +6,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from garmin_auth.auth import NEEDS_MFA
 from garminconnect import (
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
@@ -38,7 +39,7 @@ def test_begin_clean_success():
 
 def test_begin_needs_mfa_stores_session():
     with patch("hevy2garmin.garmin_login.GarminAuth") as GA:
-        GA.return_value.login.return_value = "needs_mfa"
+        GA.return_value.login.return_value = NEEDS_MFA
         out = garmin_login.begin("e@x.com", "pw")
     assert out["status"] == "needs_mfa"
     assert out["session_id"]
@@ -84,3 +85,12 @@ def test_pending_store_ttl_eviction():
     sid = store.put(MagicMock(), now=1000.0)
     assert store.get(sid, now=1500.0) is not None       # within TTL
     assert store.get(sid, now=1000.0 + 601) is None      # expired
+
+
+def test_complete_empty_code_is_mfa_failed():
+    auth = MagicMock()
+    auth.resume_login.side_effect = ValueError("mfa_code must be a non-empty string")
+    sid = garmin_login._store.put(auth, time.time())
+    out = garmin_login.complete(sid, "")
+    assert out["status"] == "mfa_failed"
+    assert garmin_login._store.get(sid, 0.0) is not None  # retained for retry

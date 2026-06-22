@@ -91,13 +91,16 @@ def begin(email: str, password: str) -> dict:
 
 def complete(session_id: str, code: str) -> dict:
     """Finish a pending MFA login with the user's code."""
+    # get-then-pop is two lock acquisitions; safe only because serve runs as a
+    # single process (see module docstring). A multi-worker deployment would need
+    # an atomic pop-if-present here.
     auth = _store.get(session_id, time.time())
     if auth is None:
         return {"status": "session_expired"}
     try:
         client = auth.resume_login(code)
-    except GarminConnectAuthenticationError:
-        # Wrong code — keep the pending entry so the user can re-enter just the code.
+    except (GarminConnectAuthenticationError, ValueError):
+        # Wrong/empty code — keep the pending entry so the user can re-enter just the code.
         return {"status": "mfa_failed", "message": "Code rejected, try again"}
     except Exception as e:
         logger.warning("garmin_login.complete unexpected error: %s", e)
