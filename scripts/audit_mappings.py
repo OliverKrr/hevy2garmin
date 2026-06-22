@@ -7,8 +7,9 @@ Two ground-truth sources are used:
   per-category ``*_exercise_name`` tables, exported from the ``garmin-fit-sdk``
   package into ``fit_exercise_catalog.json`` (committed next to this script, so
   the audit runs without the SDK installed). Regenerate the export with
-  ``--regenerate-catalog`` after ``pip install garmin-fit-sdk`` *or* with the
-  cloned SDK on ``PYTHONPATH``. NB: the runtime ``fit-tool`` dependency carries
+  ``--regenerate-catalog`` after installing the SDK via the ``audit`` extra
+  (``pip install -e ".[audit]"``); a cloned SDK on ``PYTHONPATH`` also works.
+  NB: the runtime ``fit-tool`` dependency carries
   a much older profile (categories capped at 32) and must NOT be used as the
   reference — it reports false "invalid" hits for every cardio-machine entry.
 
@@ -29,7 +30,7 @@ Checks performed:
 Usage:
   python scripts/audit_mappings.py                     # FIT audit (+ Hevy if key set)
   HEVY_API_KEY=... python scripts/audit_mappings.py    # include Hevy cross-check
-  PYTHONPATH=../reference/garmin/fit-python-sdk python scripts/audit_mappings.py --regenerate-catalog
+  pip install -e ".[audit]" && python scripts/audit_mappings.py --regenerate-catalog
 """
 from __future__ import annotations
 
