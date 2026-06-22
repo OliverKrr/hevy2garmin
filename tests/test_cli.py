@@ -62,3 +62,32 @@ class TestSyncDryRun:
     def test_since_flag(self) -> None:
         result = run_cli("sync", "--since", "2026-01-01", "--help")
         assert result.returncode == 0
+
+
+from unittest.mock import patch as _patch
+
+from hevy2garmin.cli import _garmin_interactive_login
+
+
+class TestGarminInteractiveLogin:
+    def test_clean_success(self, capsys) -> None:
+        with _patch("hevy2garmin.garmin_login.begin",
+                    return_value={"status": "success", "display_name": "Jane"}):
+            _garmin_interactive_login("e@x.com", "pw")
+        assert "Authenticated as Jane" in capsys.readouterr().out
+
+    def test_mfa_flow(self, capsys) -> None:
+        with _patch("hevy2garmin.garmin_login.begin",
+                    return_value={"status": "needs_mfa", "session_id": "sid-1"}), \
+             _patch("hevy2garmin.garmin_login.complete",
+                    return_value={"status": "success", "display_name": "Jane"}) as comp, \
+             _patch("builtins.input", return_value="123456"):
+            _garmin_interactive_login("e@x.com", "pw")
+        comp.assert_called_once_with("sid-1", "123456")
+        assert "Authenticated as Jane" in capsys.readouterr().out
+
+    def test_invalid_credentials_prints_and_returns(self, capsys) -> None:
+        with _patch("hevy2garmin.garmin_login.begin",
+                    return_value={"status": "invalid_credentials", "message": "bad"}):
+            _garmin_interactive_login("e@x.com", "pw")
+        assert "email" in capsys.readouterr().out.lower()
