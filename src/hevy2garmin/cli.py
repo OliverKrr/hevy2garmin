@@ -26,7 +26,11 @@ def _garmin_interactive_login(email: str, password: str) -> None:
 
     result = garmin_login.begin(email, password)
     if result["status"] == "needs_mfa":
-        code = input("  Garmin sent a verification code — enter it: ").strip()
+        try:
+            code = input("  Garmin sent a verification code — enter it: ").strip()
+        except EOFError:
+            print("✗ No input available — cannot complete MFA.")
+            return
         result = garmin_login.complete(result["session_id"], code)
 
     status = result["status"]
@@ -39,7 +43,7 @@ def _garmin_interactive_login(email: str, password: str) -> None:
     elif status == "mfa_failed":
         print("✗ The verification code was rejected.")
     elif status == "session_expired":
-        print("✗ Login session expired — run init again.")
+        print("✗ Login session expired — run init again.")  # parity with HTTP surface; unreachable in CLI
     else:
         print(f"✗ Failed: {result.get('message', 'unknown error')}")
 
