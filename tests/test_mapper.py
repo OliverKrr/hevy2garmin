@@ -42,6 +42,14 @@ class TestLookupBuiltIn:
     def test_mapping_count_minimum(self) -> None:
         assert len(HEVY_TO_GARMIN) >= 400
 
+    def test_cable_core_pallof_press(self) -> None:
+        # Hevy's exact name (single-f "Pallof") must map to the dedicated
+        # FIT core/cable_core_press subcategory, not fall through to unknown.
+        cat, subcat, name = lookup_exercise("Cable Core Pallof Press")
+        assert cat == 5
+        assert subcat == 6
+        assert name == "Cable Core Pallof Press"
+
     def test_preserves_original_name(self) -> None:
         _, _, name = lookup_exercise("Deadlift (Barbell)")
         assert name == "Deadlift (Barbell)"
