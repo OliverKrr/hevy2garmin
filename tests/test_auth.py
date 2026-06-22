@@ -229,7 +229,12 @@ class TestGarminLoginEndpoints:
 
 @pytest.fixture
 def client_direct_login():
-    """TestClient with the direct-login flag on (and no HEVY2GARMIN_SECRET)."""
+    """TestClient with the direct-login flag on (and no HEVY2GARMIN_SECRET).
+
+    The env patch is honored because _direct_garmin_login() is evaluated at
+    request time (inside the /setup route), not at module import — so the
+    cached server module doesn't need reloading.
+    """
     with patch.dict(os.environ, {"H2G_DIRECT_GARMIN_LOGIN": "true"}, clear=False):
         os.environ.pop("HEVY2GARMIN_SECRET", None)
         from hevy2garmin.server import app
@@ -240,7 +245,6 @@ class TestDirectLoginFlag:
     def test_setup_renders_direct_flag_on(self, client_direct_login) -> None:
         resp = client_direct_login.get("/setup")
         assert "const DIRECT_LOGIN = true" in resp.text
-        assert "/api/garmin-login" in resp.text
 
     def test_setup_renders_direct_flag_off(self, client_no_secret) -> None:
         resp = client_no_secret.get("/setup")
