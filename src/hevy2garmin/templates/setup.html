@@ -260,10 +260,22 @@ async function handleGarminLoginResponse(data) {
         return;
     }
 
-    // Unknown / error status — reveal the manual fallback so the user has a path forward.
+    if (data.status === 'session_expired') {
+        mfaRow.style.display = 'none';
+        garminMfaSessionId = null;
+        result.innerHTML = '<span style="color: var(--red);">&#10007; Login session expired — click Connect again.</span>';
+        return;
+    }
+
+    // Unknown / error status.
     const msg = (data && (data.message || data.error)) || 'Unexpected error';
-    result.innerHTML = '<span style="color: var(--red);">&#10007; ' + msg + '. Try the manual sign-in below.</span>';
-    if (!DIRECT_LOGIN) revealManualFallback();
+    if (DIRECT_LOGIN) {
+        result.innerHTML = '<span style="color: var(--red);">&#10007; ' + msg + '. Please try again.</span>';
+    } else {
+        result.innerHTML = '<span style="color: var(--red);">&#10007; ' + msg + '. Try the manual sign-in below.</span>';
+        revealManualFallback();
+    }
+    return;
 }
 
 function revealManualFallback() {

@@ -178,6 +178,12 @@ class TestGarminLoginEndpoints:
         resp = client_with_secret.post("/api/garmin-login", json={"email": "e", "password": "p"})
         assert resp.status_code == 401
 
+    def test_mfa_requires_cookie(self, client_with_secret) -> None:
+        resp = client_with_secret.post(
+            "/api/garmin-login-mfa", json={"session_id": "s", "code": "123456"}
+        )
+        assert resp.status_code == 401
+
     def test_login_begin_success(self, client_with_secret) -> None:
         with patch("hevy2garmin.garmin_login.begin",
                    return_value={"status": "success", "display_name": "Jane"}):
