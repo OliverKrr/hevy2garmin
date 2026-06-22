@@ -171,3 +171,41 @@ class TestPasswordAuthRoutes:
         resp = client_with_password.get("/api/sync-one")
         # API routes should get 401, not a redirect
         assert resp.status_code == 401
+
+
+class TestGarminLoginEndpoints:
+    def test_login_requires_cookie(self, client_with_secret) -> None:
+        resp = client_with_secret.post("/api/garmin-login", json={"email": "e", "password": "p"})
+        assert resp.status_code == 401
+
+    def test_login_begin_success(self, client_with_secret) -> None:
+        with patch("hevy2garmin.garmin_login.begin",
+                   return_value={"status": "success", "display_name": "Jane"}):
+            resp = client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "success", "display_name": "Jane"}
+
+    def test_login_begin_needs_mfa(self, client_with_secret) -> None:
+        with patch("hevy2garmin.garmin_login.begin",
+                   return_value={"status": "needs_mfa", "session_id": "sid-1"}):
+            resp = client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        assert resp.json() == {"status": "needs_mfa", "session_id": "sid-1"}
+
+    def test_login_mfa_complete(self, client_with_secret) -> None:
+        with patch("hevy2garmin.garmin_login.complete",
+                   return_value={"status": "success", "display_name": "Jane"}) as comp:
+            resp = client_with_secret.post(
+                "/api/garmin-login-mfa",
+                json={"session_id": "sid-1", "code": "123456"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        comp.assert_called_once_with("sid-1", "123456")
+        assert resp.json()["status"] == "success"

@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.concurrency import run_in_threadpool
 from jinja2 import Environment, FileSystemLoader
 
 from hevy2garmin import db, __version__
@@ -21,6 +22,7 @@ from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_p
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.sync import sync
+from hevy2garmin import garmin_login
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -310,7 +312,8 @@ async def check_setup(request: Request, call_next):
             return Response("Unauthorized", status_code=401)
 
     # Setup page and sync endpoints: skip the "is configured?" redirect
-    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/setup-actions", "/api/garmin-ticket"):
+    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/setup-actions",
+                "/api/garmin-ticket", "/api/garmin-login", "/api/garmin-login-mfa"):
         response = await call_next(request)
     else:
         # Redirect to setup if not configured
@@ -432,9 +435,14 @@ async def dashboard(request: Request):
 
 
 
+def _direct_garmin_login() -> bool:
+    return os.environ.get("H2G_DIRECT_GARMIN_LOGIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
-    return _render("setup.html", config=load_config(), is_cloud=bool(db.get_database_url()))
+    return _render("setup.html", config=load_config(), is_cloud=bool(db.get_database_url()),
+                   direct_garmin_login=_direct_garmin_login())
 
 
 @app.post("/setup")
@@ -593,6 +601,32 @@ async def garmin_ticket_store(request: Request):
             _json.dumps({"error": str(e)[:200]}),
             status_code=500,
         )
+
+
+@app.post("/api/garmin-login")
+async def garmin_login_begin(request: Request):
+    """Direct (Pi-side) Garmin login, step 1. Never sends the password off-host."""
+    from fastapi.responses import JSONResponse
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    if not email or not password:
+        return JSONResponse({"status": "error", "message": "Email and password required"}, status_code=400)
+    result = await run_in_threadpool(garmin_login.begin, email, password)
+    return JSONResponse(result)
+
+
+@app.post("/api/garmin-login-mfa")
+async def garmin_login_mfa(request: Request):
+    """Direct (Pi-side) Garmin login, step 2 — submit the MFA code."""
+    from fastapi.responses import JSONResponse
+    body = await request.json()
+    session_id = (body.get("session_id") or "").strip()
+    code = (body.get("code") or "").strip()
+    if not session_id or not code:
+        return JSONResponse({"status": "error", "message": "session_id and code required"}, status_code=400)
+    result = await run_in_threadpool(garmin_login.complete, session_id, code)
+    return JSONResponse(result)
 
 
 @app.get("/workouts", response_class=HTMLResponse)
