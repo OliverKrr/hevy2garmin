@@ -197,7 +197,23 @@ class TestGarminLoginEndpoints:
                 json={"email": "e@x.com", "password": "pw"},
                 cookies={"h2g_auth": "test-secret-123"},
             )
+        assert resp.status_code == 200
         assert resp.json() == {"status": "needs_mfa", "session_id": "sid-1"}
+
+    def test_login_missing_fields_returns_400(self, client_with_secret) -> None:
+        resp = client_with_secret.post(
+            "/api/garmin-login", json={}, cookies={"h2g_auth": "test-secret-123"}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["status"] == "error"
+
+    def test_mfa_missing_fields_returns_400(self, client_with_secret) -> None:
+        resp = client_with_secret.post(
+            "/api/garmin-login-mfa", json={"session_id": "sid"},
+            cookies={"h2g_auth": "test-secret-123"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["status"] == "error"
 
     def test_login_mfa_complete(self, client_with_secret) -> None:
         with patch("hevy2garmin.garmin_login.complete",
