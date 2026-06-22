@@ -102,7 +102,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     #  BACK – Rows (category 23)
     # ======================================================================= #
     "Bent Over Row (Band)":                     (23, 0),   # row / barbell_straight_leg_deadlift_to_row (closest band row)
-    "Bent Over Row (Barbell)":                  (23, 46),  # row / bent_over_barbell_row
+    "Bent Over Row (Barbell)":                  (23, 46),   # row / bent_over_row_with_barbell
     "Bent Over Row (Dumbbell)":                 (23, 2),   # row / dumbbell_row
     "Chest Supported Incline Row (Dumbbell)":   (23, 40),  # row / chest_supported_dumbbell_row
     "Dumbbell Row":                             (23, 2),   # row / dumbbell_row
@@ -115,7 +115,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Landmine Row":                             (23, 13),  # row / one_arm_bent_over_row (closest)
     "Low Row (Suspension)":                     (23, 26),  # row / suspended_inverted_row
     "Meadows Rows (Barbell)":                   (23, 13),  # row / one_arm_bent_over_row
-    "Pendlay Row (Barbell)":                    (23, 46),  # row / bent_over_barbell_row (Pendlay variant)
+    "Pendlay Row (Barbell)":                    (23, 46),   # row / bent_over_row_with_barbell (Pendlay variant)
     "Renegade Row (Dumbbell)":                  (23, 15),  # row / renegade_row
     "Seated Cable Row - Bar Grip":              (23, 18),  # row / seated_cable_row
     "Seated Cable Row - Bar Wide Grip":         (23, 33),  # row / wide_grip_seated_cable_row
@@ -357,9 +357,10 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Reverse Lunge":                            (17, 32),  # lunge / lunge (reverse variant)
     "Reverse Lunge (Barbell)":                  (17, 11),  # lunge / barbell_reverse_lunge
     "Reverse Lunge (Dumbbell)":                 (17, 21),  # lunge / dumbbell_lunge (reverse)
-    "Split Squat (Dumbbell)":                   (17, 28),  # lunge / dumbbell_split_squat
+    "Split Squat (Dumbbell)":                   (17, 21),   # lunge / dumbbell_lunge (no dedicated dumbbell split squat in FIT)
     "Walking Lunge":                            (17, 78),  # lunge / walking_lunge
     "Walking Lunge (Dumbbell)":                 (17, 77),  # lunge / walking_dumbbell_lunge
+    "Walking Lunge (Sandbag)":                  (17, 79),   # lunge / weighted_walking_lunge (sandbag)
 
     # ======================================================================= #
     #  LEGS – Deadlift (category 8)
@@ -540,13 +541,15 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Jump Squat":                               (20, 3),   # plyo / body_weight_jump_squat
     "Lateral Box Jump":                         (20, 19),  # plyo / lateral_plyo_squats (closest)
     "Ball Slams":                               (20, 25),  # plyo / medicine_ball_slam
-    "Sled Push":                                (20, 29),  # plyo / squat_jump_onto_box (closest heavy plyo)
+    "Sled Push":                                (45, 4),    # sled / push (FIT gained a sled category)
+    "Sled Pull":                                (45, 0),    # sled / backward_drag
 
     # ======================================================================= #
     #  TOTAL BODY (category 29)
     # ======================================================================= #
     "Burpee":                                   (29, 0),   # total_body / burpee
     "Burpee Over the Bar":                      (29, 0),   # total_body / burpee (over bar variant)
+    "Burpee Broad Jumps":                       (29, 0),    # total_body / burpee (broad-jump variant; no dedicated FIT name)
 
     # ======================================================================= #
     #  CARRY (category 3)
@@ -557,7 +560,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     # ======================================================================= #
     #  WARM UP (category 31)
     # ======================================================================= #
-    "Warm Up":                                  (31, 0),   # warm_up / generic warm up
+    "Warm Up":                                  (65534, 0), # unknown - no generic warm_up exercise in FIT
 
     # ======================================================================= #
     #  FLEXIBILITY / STABILITY – mapped to known FIT categories
@@ -565,7 +568,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Bird Dog":                                 (11, 1),   # hip_stability / dead_bug (closest quadruped stability)
     "Dead Bug":                                 (11, 1),   # hip_stability / dead_bug
     "Dead Hang":                                (21, 38),  # pull_up / pull_up (hang variant – grip/lat endurance)
-    "Downward Dog":                             (31, 0),   # warm_up / generic (yoga pose)
+    "Downward Dog":                             (36, 21),   # pose / downward_facing_dog
     "Front Lever Hold":                         (21, 38),  # pull_up / pull_up (front lever)
     "Front Lever Raise":                        (21, 38),  # pull_up / pull_up (front lever)
     "Handstand Hold":                           (22, 25),  # push_up / handstand_push_up (hold variant)
@@ -577,39 +580,41 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Lying Neck Curls (Weighted)":              (65534, 0), # unknown – no FIT neck category
     "Lying Neck Extension":                     (65534, 0), # unknown – no FIT neck category
     "Lying Neck Extension (Weighted)":          (65534, 0), # unknown – no FIT neck category
+    "Ski Erg":                                  (65534, 0), # unknown - no FIT ski-erg exercise
+    "Tibialis Raise (Wand/BW)":                 (65534, 0), # unknown - no FIT tibialis/dorsiflexion strength exercise
 
     # ======================================================================= #
     #  KETTLEBELL SPECIFIC
     # ======================================================================= #
     "Kettlebell Around the World":              (5, 46),   # core / russian_twist (closest rotational KB)
-    "Kettlebell Halo":                          (25, 3),   # shoulder_stability / bent_arm_lateral_raise (closest)
+    "Kettlebell Halo":                          (25, 3),    # shoulder_stability / bent_arm_lateral_raise_and_external_rotation
     "Kettlebell Turkish Get Up":                (29, 0),   # total_body / burpee (closest full-body KB)
 
     # ======================================================================= #
     #  CARDIO / MACHINES — uses newer FIT SDK categories (33+) where available
     # ======================================================================= #
-    "Aerobics":                                 (2, 0),    # cardio / generic
+    "Aerobics":                                 (65534, 0), # unknown - whole-activity cardio, no FIT exercise
     "Air Bike":                                 (41, 0),   # indoor_bike / air_bike
-    "Battle Ropes":                             (38, 0),   # battle_rope / alternating_waves
+    "Battle Ropes":                             (38, 12),   # battle_rope / double_arm_wave
     "Boxing":                                   (2, 42),   # cardio / punch
-    "Climbing":                                 (2, 0),    # cardio / generic
+    "Climbing":                                 (65534, 0), # unknown - whole-activity sport, no FIT exercise
     "Cycling":                                  (33, 0),   # bike / bike
     "Elliptical Trainer":                       (39, 0),   # elliptical / elliptical
-    "HIIT":                                     (2, 0),    # cardio / generic
+    "HIIT":                                     (65534, 0), # unknown - a format, not a specific FIT exercise
     "Hiking":                                   (32, 1),   # run / walk (hiking = walking)
     "Jump Rope":                                (2, 6),    # cardio / jump_rope
     "Jumping Jack":                             (2, 12),   # cardio / jumping_jacks
-    "Pilates":                                  (2, 0),    # cardio / generic
+    "Pilates":                                  (65534, 0), # unknown - discipline, no FIT exercise
     "Rowing Machine":                           (42, 0),   # indoor_row / rowing_machine
-    "Skating":                                  (2, 0),    # cardio / generic
-    "Skiing":                                   (2, 0),    # cardio / generic
-    "Snowboarding":                             (2, 0),    # cardio / generic
+    "Skating":                                  (65534, 0), # unknown - whole-activity sport, no FIT exercise
+    "Skiing":                                   (65534, 0), # unknown - whole-activity sport, no FIT exercise
+    "Snowboarding":                             (65534, 0), # unknown - whole-activity sport, no FIT exercise
     "Spinning":                                 (41, 3),   # indoor_bike / stationary_bike
-    "Stretching":                               (31, 0),   # warm_up / generic (stretching)
-    "Swimming":                                 (2, 0),    # cardio / generic
+    "Stretching":                               (65534, 0), # unknown - no generic stretch exercise in FIT
+    "Swimming":                                 (65534, 0), # unknown - whole-activity sport, no FIT exercise
     "Treadmill":                                (52, 1),   # run_indoor / treadmill
-    "Yoga":                                     (36, 0),   # pose / generic (yoga)
-    "High Knees":                               (2, 0),    # cardio / generic
+    "Yoga":                                     (65534, 0), # unknown - generic; no generic pose in FIT
+    "High Knees":                               (31, 26),   # warm_up / walking_high_knees
     "Sprints":                                  (32, 3),   # run / sprint
     "Cable Pull Through":                       (10, 11),  # hip_raise / hip_raise (cable pull-through = hip hinge)
 
