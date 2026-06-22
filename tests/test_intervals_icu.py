@@ -87,3 +87,13 @@ def test_delete_failure_never_raises(icu_env):
         req.get.return_value = _resp(json_data=[{"id": 222, "external_id": "G999"}])
         req.delete.return_value = _resp(raise_exc=RuntimeError("403"))
         assert try_delete_icu_activity(999, START) is False
+
+
+def test_zero_icu_id_is_deleted(icu_env):
+    # An ICU activity id of 0 is valid and must be deleted, not treated as "not found".
+    with patch("hevy2garmin.intervals_icu.requests") as req:
+        req.get.return_value = _resp(json_data=[{"id": 0, "external_id": "G999"}])
+        req.delete.return_value = _resp()
+        assert try_delete_icu_activity(999, START) is True
+        del_args, _ = req.delete.call_args
+        assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/0"

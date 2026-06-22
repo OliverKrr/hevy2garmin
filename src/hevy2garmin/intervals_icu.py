@@ -70,7 +70,7 @@ def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool
             icu_id = act.get("id")
             break
 
-    if not icu_id:
+    if icu_id is None:
         logger.debug("ICU cleanup: no activity with external_id=%s in window %s–%s", target_external_id, oldest, newest)
         return False
 
