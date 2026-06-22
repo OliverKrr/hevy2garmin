@@ -423,6 +423,15 @@ def _fit_replace_merge(client, hevy_workout: dict, database, match: dict) -> Mer
                 "You will have two strength activities at this timestamp.",
                 new_id, original_id, e,
             )
+        else:
+            # Also remove from intervals.icu so the original doesn't linger as a
+            # duplicate when the new merged activity syncs from Garmin. Silent
+            # no-op unless INTERVALS_API_KEY / INTERVALS_ATHLETE_ID are set.
+            try:
+                from hevy2garmin.intervals_icu import try_delete_icu_activity
+                try_delete_icu_activity(original_id, start_time)
+            except Exception as e:
+                logger.warning("  ICU cleanup raised unexpectedly: %s", e)
     else:
         logger.info("  Kept original watch activity %s (merge_delete_original=False)", original_id)
 
