@@ -18,6 +18,8 @@ FIT SDK exercise categories used:
 
 from __future__ import annotations
 
+import re
+
 # --------------------------------------------------------------------------- #
 # Mapping: Hevy exercise name  ->  (FIT exercise category, subcategory)
 # --------------------------------------------------------------------------- #
@@ -639,6 +641,34 @@ _custom_mappings: dict[str, tuple[int, int]] = {}
 _custom_loaded = False
 
 
+def _normalize_name(name: str) -> str:
+    """Collapse a Hevy title to its alphanumeric skeleton (lowercased).
+
+    Strips case, whitespace, and punctuation so minor title formatting drift
+    (e.g. ``Bench Press - Close Grip`` vs ``Bench Press – Close Grip``, extra
+    spaces, hyphen/parenthesis differences) still resolves. This is NOT fuzzy
+    matching: only exact alphanumeric matches collapse together, so two
+    distinct exercises never collide. Letter-level typos (``Palloff`` vs
+    ``Pallof``) remain misses by design — a wrong mapping is worse than UNKNOWN
+    for a sync tool.
+    """
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+# Lazily-built normalized index of the built-in table (static at runtime).
+_normalized_index: dict[str, tuple[int, int]] | None = None
+
+
+def _get_normalized_index() -> dict[str, tuple[int, int]]:
+    global _normalized_index
+    if _normalized_index is None:
+        index: dict[str, tuple[int, int]] = {}
+        for name, pair in HEVY_TO_GARMIN.items():
+            index.setdefault(_normalize_name(name), pair)
+        _normalized_index = index
+    return _normalized_index
+
+
 def _ensure_custom_loaded() -> None:
     """Load custom mappings from DB (cloud) or disk (local) on first use."""
     global _custom_loaded
@@ -711,16 +741,27 @@ def save_custom_mapping(hevy_name: str, category: int, subcategory: int) -> None
 def lookup_exercise(hevy_name: str) -> tuple[int, int, str]:
     """Return ``(category, subcategory, display_name)`` for a Hevy exercise.
 
-    Checks custom user mappings first, then the built-in 438-entry table.
-    If not found anywhere, returns sentinel category ``65534``.
+    Resolution order: exact custom mapping, exact built-in mapping, then a
+    normalized fallback (case/space/punctuation-insensitive) against custom
+    then built-in. If nothing matches, returns sentinel category ``65534``.
+    The returned display name is always the original ``hevy_name``.
     """
     _ensure_custom_loaded()
-    # Custom mappings take priority
+    # 1. Exact custom mapping (highest priority)
     if hevy_name in _custom_mappings:
         cat, subcat = _custom_mappings[hevy_name]
         return (cat, subcat, hevy_name)
-    # Built-in mappings
+    # 2. Exact built-in mapping
     pair = HEVY_TO_GARMIN.get(hevy_name)
     if pair is not None:
         return (pair[0], pair[1], hevy_name)
+    # 3. Normalized fallback — resilient to formatting drift, never fuzzy.
+    norm = _normalize_name(hevy_name)
+    if norm:
+        for name, custom_pair in _custom_mappings.items():
+            if _normalize_name(name) == norm:
+                return (custom_pair[0], custom_pair[1], hevy_name)
+        pair = _get_normalized_index().get(norm)
+        if pair is not None:
+            return (pair[0], pair[1], hevy_name)
     return (_UNKNOWN_CATEGORY, _UNKNOWN_SUBCATEGORY, hevy_name)

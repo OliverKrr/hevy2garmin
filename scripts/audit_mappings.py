@@ -145,7 +145,8 @@ def audit_hevy(mapper_keys: set[str]) -> tuple | None:
             break
         page += 1
     titles = {t["title"] for t in templates if t.get("title")}
-    return titles, sorted(titles - mapper_keys), sorted(mapper_keys - titles)
+    custom = {t["title"] for t in templates if t.get("title") and t.get("is_custom")}
+    return titles, sorted(titles - mapper_keys), sorted(mapper_keys - titles), custom
 
 
 def main() -> int:
@@ -189,16 +190,24 @@ def main() -> int:
     if hevy is None:
         print("\nHevy catalog: skipped (set HEVY_API_KEY to enable)")
     else:
-        titles, unmapped, ghosts = hevy
-        print(f"\nHevy catalog: {len(titles)} titles")
-        print(f"  Hevy exercises not in mapper: {len(unmapped)}")
-        print(f"  mapper keys not in Hevy:      {len(ghosts)}")
-        if unmapped:
-            print("\n== UNMAPPED HEVY EXERCISES ==")
-            for t in unmapped:
+        titles, unmapped, ghosts, custom = hevy
+        # Custom templates are user-specific; being unmapped is expected, not a gap.
+        unmapped_default = [t for t in unmapped if t not in custom]
+        unmapped_custom = [t for t in unmapped if t in custom]
+        print(f"\nHevy catalog: {len(titles)} titles ({len(custom)} custom)")
+        print(f"  unmapped default exercises:  {len(unmapped_default)}  (real coverage gap)")
+        print(f"  unmapped custom exercises:   {len(unmapped_custom)}  (expected; user-specific)")
+        print(f"  mapper keys not in Hevy:     {len(ghosts)}")
+        if unmapped_default:
+            print("\n== UNMAPPED DEFAULT HEVY EXERCISES (real gap) ==")
+            for t in unmapped_default:
+                print(f"  {t}")
+        if unmapped_custom:
+            print("\n== UNMAPPED CUSTOM HEVY EXERCISES (expected) ==")
+            for t in unmapped_custom:
                 print(f"  {t}")
         if ghosts:
-            print("\n== MAPPER KEYS MATCHING NO HEVY TITLE (typos / renamed / custom) ==")
+            print("\n== MAPPER KEYS MATCHING NO HEVY TITLE (typos / renamed / removed) ==")
             for k in ghosts:
                 print(f"  {k!r}")
 

@@ -88,6 +88,27 @@ class TestGroundTruthMappings:
         for name in self.NOW_UNKNOWN:
             assert lookup_exercise(name)[:2] == (_UNKNOWN_CATEGORY, 0), name
 
+    def test_normalized_fallback_resolves_formatting_drift(self) -> None:
+        # Case, whitespace and punctuation differences still resolve to the
+        # same built-in mapping as the canonical title.
+        canonical = lookup_exercise("Bench Press (Barbell)")[:2]
+        for variant in (
+            "bench press (barbell)",          # lowercase
+            "BENCH PRESS (BARBELL)",          # uppercase
+            "Bench  Press  (Barbell)",        # extra spaces
+            "Bench Press [Barbell]",          # different brackets
+            "  Bench Press (Barbell)  ",      # surrounding whitespace
+        ):
+            assert lookup_exercise(variant)[:2] == canonical, variant
+
+    def test_normalized_fallback_is_not_fuzzy(self) -> None:
+        # A letter-level typo is NOT silently matched (would be a wrong mapping).
+        assert lookup_exercise("Bonch Press (Barbell)")[:2] == (_UNKNOWN_CATEGORY, 0)
+
+    def test_normalized_fallback_preserves_display_name(self) -> None:
+        _, _, name = lookup_exercise("bench press (barbell)")
+        assert name == "bench press (barbell)"
+
     def test_every_mapping_is_valid_fit_pair(self) -> None:
         """Every (cat, sub) must exist in the official FIT catalog ground truth."""
         catalog_path = Path(__file__).resolve().parent.parent / "scripts" / "fit_exercise_catalog.json"
