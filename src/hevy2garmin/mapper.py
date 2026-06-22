@@ -207,14 +207,12 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Rear Delt Reverse Fly (Cable)":            (9, 6),    # flye / single_arm_standing_cable_reverse_flye
     "Rear Delt Reverse Fly (Dumbbell)":         (9, 5),    # flye / kneeling_rear_flye
     "Rear Delt Reverse Fly (Machine)":          (9, 5),    # flye / kneeling_rear_flye (closest machine)
-    "Rear Deltoid":                             (9, 5),    # flye / kneeling_rear_flye
     "Reverse Fly Single Arm (Cable)":           (9, 6),    # flye / single_arm_standing_cable_reverse_flye
     "Band Pullaparts":                          (9, 5),    # flye / kneeling_rear_flye (closest band)
 
     # ======================================================================= #
     #  SHOULDERS – Shoulder Stability (category 25)
     # ======================================================================= #
-    "Shoulder Extension":                       (25, 3),   # shoulder_stability / bent_arm_lateral_raise_and_external_rotation
     "Shoulder Taps":                            (25, 3),   # shoulder_stability / bent_arm_lateral_raise_and_external_rotation (closest)
 
     # ======================================================================= #
@@ -258,7 +256,6 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Reverse Curl (Barbell)":                   (7, 31),   # curl / reverse_grip_barbell_biceps_curl
     "Reverse Curl (Cable)":                     (7, 31),   # curl / reverse_grip_barbell_biceps_curl (closest cable)
     "Reverse Curl (Dumbbell)":                  (7, 31),   # curl / reverse_grip_barbell_biceps_curl (closest)
-    "Reverse EZ-Bar Curl":                      (7, 29),   # curl / reverse_ez_bar_curl
     "Reverse Grip Concentration Curl":          (7, 31),   # curl / reverse_grip_barbell_biceps_curl (closest)
     "Rope Cable Curl":                          (7, 8),    # curl / cable_biceps_curl (rope attachment)
     "Seated Incline Curl (Dumbbell)":           (7, 22),   # curl / incline_dumbbell_biceps_curl
@@ -275,7 +272,6 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     #  TRICEPS – Extensions (category 30)
     # ======================================================================= #
     "Floor Triceps Dip":                        (30, 0),   # triceps_extension / bench_dip (closest floor dip)
-    "One-Arm Cable Cross Body Triceps Extension": (30, 3), # triceps_extension / cable_kickback
     "Overhead Triceps Extension (Cable)":       (30, 5),   # triceps_extension / cable_overhead_triceps_extension
     "Seated Dip Machine":                       (30, 2),   # triceps_extension / body_weight_dip (closest machine)
     "Seated Triceps Press":                     (30, 20),  # triceps_extension / seated_barbell_overhead_triceps_extension
@@ -451,7 +447,6 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     # ======================================================================= #
     "Ab Scissors":                              (5, 49),   # core / bicycle (closest scissors)
     "Cable Core Pallof Press":                  (5, 6),    # core / cable_core_press (exact anti-rotation match)
-    "Cable Core Palloff Press":                 (5, 6),    # core / cable_core_press (alias for double-f spelling)
     "Cable Twist (Down to up)":                 (4, 2),    # chop / cable_woodchop (twist variant)
     "Cable Twist (Up to down)":                 (4, 2),    # chop / cable_woodchop (twist variant)
     "Russian Twist (Bodyweight)":               (5, 46),   # core / russian_twist
