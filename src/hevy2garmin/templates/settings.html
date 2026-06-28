@@ -175,23 +175,6 @@
             When you start a <strong>Strength Training</strong> activity on your Garmin watch at the gym, hevy2garmin will detect it and combine your Hevy exercise data with that activity instead of creating a new one.
             You get 1-second HR sampling, training effect, EPOC, and recovery data. If no matching watch activity is found, it falls back to the normal upload.
         </p>
-        <div class="form-group" style="margin-top: 12px;">
-            <label class="form-label" for="merge_strategy">Merge strategy</label>
-            <select class="form-select" id="merge_strategy" name="merge_strategy">
-                <option value="exercise_sets" {{ 'selected' if config.get('merge_strategy', 'exercise_sets') == 'exercise_sets' }}>Exercise Sets API — non-destructive (default)</option>
-                <option value="fit_replace" {{ 'selected' if config.get('merge_strategy', 'exercise_sets') == 'fit_replace' }}>FIT Replace — regenerate &amp; replace activity</option>
-            </select>
-            <div class="form-hint">
-                <strong>Exercise Sets API</strong> pushes Hevy sets onto the watch activity via Garmin's API, keeping its HR, training effect and EPOC untouched.
-                <strong>FIT Replace</strong> regenerates a fresh FIT (watch HR + Hevy exercises), uploads it and deletes the original — exercise names render reliably, but the activity is replaced.
-            </div>
-        </div>
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-top: 12px;">
-            <input type="hidden" name="merge_delete_original" value="off">
-            <input type="checkbox" name="merge_delete_original" value="on" {{ 'checked' if config.get('merge_delete_original', True) }} style="width: 18px; height: 18px; accent-color: var(--accent);">
-            <span style="font-size: 13px; color: var(--text-secondary);">Delete original watch activity after FIT Replace</span>
-        </label>
-        <div class="form-hint">Only applies to <strong>FIT Replace</strong>. Turn off to keep both activities and merge them manually in Garmin Connect.</div>
     </div>
 
     <!-- Activity Description Section -->
@@ -233,6 +216,28 @@
                         <label class="form-label" for="merge_max_drift_min">Start Time Tolerance (minutes)</label>
                         <input class="form-input" type="number" id="merge_max_drift_min" name="merge_max_drift_min" value="{{ config.get('merge_max_drift_min', 20) }}" min="5" max="60" step="5">
                         <div class="form-hint">Max difference between Hevy and Garmin start times (default 20 min)</div>
+                    </div>
+                </div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label class="form-label" for="merge_extra_types">Additional Watch Activity Types</label>
+                        <input class="form-input" type="text" id="merge_extra_types" name="merge_extra_types" value="{{ merge_extra_types }}" placeholder="bouldering, indoor_climbing">
+                        <div class="form-hint">
+                            <strong>Strength Training</strong> is always enhanced. Add other Garmin activity types here (comma-separated, using Garmin's internal name) to also enhance them with the matching Hevy workout, e.g. <code>bouldering</code>, <code>indoor_climbing</code> for climbing sessions.
+                        </div>
+                    </div>
+                </div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label class="form-label" for="merge_watch_strategy">Workouts recorded on a watch</label>
+                        <select class="form-input" id="merge_watch_strategy" name="merge_watch_strategy">
+                            <option value="replace" {{ 'selected' if config.get('merge_watch_strategy', 'replace') == 'replace' }}>Replace with one named activity (named exercises)</option>
+                            <option value="merge" {{ 'selected' if config.get('merge_watch_strategy', 'replace') == 'merge' }}>Merge sets into the watch activity (keeps watch metrics)</option>
+                            <option value="describe" {{ 'selected' if config.get('merge_watch_strategy', 'replace') == 'describe' }}>Keep the watch activity, list exercises in its description</option>
+                        </select>
+                        <div class="form-hint">
+                            Garmin does not show exercise names on a workout your watch recorded, so you always end up with one activity but with a tradeoff. <strong>Replace</strong> uploads one named activity (with your heart rate) and deletes the watch copy, so exercises are named, but you lose watch-only metrics like training effect. <strong>Merge sets</strong> pushes the sets, reps, and weights into the watch activity and keeps it, so you keep all watch metrics and structured set data, but the exercise names show as "Unknown". <strong>Keep + describe</strong> leaves the watch activity untouched and only lists the exercises in its description, with no structured sets.
+                        </div>
                     </div>
                 </div>
 

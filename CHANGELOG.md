@@ -6,8 +6,71 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-06-26
+
+### Added
+- **"Unsync All" button** ([#174](https://github.com/drkostas/hevy2garmin/issues/174)). On the Workouts page, next to Reload Data. Clears the sync status of every workout so the next sync re-imports them all, which is handy after a mapping fix instead of unsyncing one at a time. It does not delete anything from Garmin, and workouts still on Garmin are skipped as duplicates on re-sync. Thanks @KaiBoos.
+
+### Fixed
+- **Footer showed the wrong version (e.g. 0.4.0) after a Vercel fork + sync** ([#189](https://github.com/drkostas/hevy2garmin/issues/189)). The version came from the installed package metadata, which the Vercel build can cache stale, so the footer showed an old number even though the code was current. It now reads the version from pyproject.toml in the deployed source, so the footer always matches the running code. Thanks @KaiBoos.
+
+## [0.5.10] - 2026-06-26
+
+### Added
+- **"Merge sets" strategy for watch-recorded workouts** ([#159](https://github.com/drkostas/hevy2garmin/issues/159)). A third option for "Workouts recorded on a watch" (Settings, Advanced), requested by @bojanmk1: push the sets, reps, and weights into the watch activity and keep it, so you keep all the watch's native metrics (heart rate, training effect, body battery) and the structured set data in one activity. The exercise names still show as "Unknown" because Garmin does not apply pushed names to watch-recorded activities, but the set data is there. Default stays "replace" (named exercises, single activity).
+
+## [0.5.9] - 2026-06-26
+
+### Added
+- **One activity for watch-recorded workouts** ([#159](https://github.com/drkostas/hevy2garmin/issues/159)). New setting "Workouts recorded on a watch" (Settings, Advanced). The default "Replace" uploads a single named activity with your heart rate and deletes the watch recording, so you get one activity with named exercises and no double-counted calories or activity totals. "Keep" leaves the watch activity untouched and lists the exercises in its description instead.
+
+## [0.5.8] - 2026-06-26
+
+### Fixed
+- **Exercises showing as "Unknown" on watch-recorded workouts** ([#159](https://github.com/drkostas/hevy2garmin/issues/159)). When a workout was recorded on a Garmin watch, merge mode pushed the exercise sets, but Garmin ignores pushed exercise identities on activities it recorded itself, so they showed "Unknown" with no reps. The tool now checks the matched activity's manufacturer and, for any activity it did not create (a watch, etc.), uploads a fresh named activity instead of merging. Heart-rate fusion still pulls the watch HR into it. Confirmed against the live Garmin API.
+
+## [0.5.7] - 2026-06-26
+
+### Fixed
+- **Auto-sync interval always reset to 2 hours** ([#177](https://github.com/drkostas/hevy2garmin/issues/177)). The interval dropdown read its value with `this.value` inside an htmx hx-vals expression, which did not resolve, so every change saved the default (120 min). It now reads the selected value explicitly, so your chosen interval sticks. Thanks @KaiBoos.
+
+## [0.5.6] - 2026-06-25
+
+### Added
+- **Language-independent exercise mapping** ([#173](https://github.com/drkostas/hevy2garmin/issues/173)). Non-English Hevy exercises (German and others) now map to Garmin automatically using Hevy's `exercise_template_id`, which is the same in every language, instead of only the English exercise name. Built from Hevy's global catalog (428 exercises) via `scripts/gen_template_map.py`. You no longer need to map every exercise by hand just because your Hevy is not set to English. Thanks @KaiBoos for the idea.
+- **"Reload Data" button on the Workouts page** ([#174](https://github.com/drkostas/hevy2garmin/issues/174)). The page serves cached workout data, so editing a workout in Hevy was not reflected until the next sync. The button refetches your latest workouts from Hevy on demand. Thanks @KaiBoos.
+
+## [0.5.5] - 2026-06-25
+
+### Fixed
+- **Mapped exercises stayed in the "Unknown" list** ([#172](https://github.com/drkostas/hevy2garmin/issues/172)). After mapping an exercise on the Mappings page, it kept showing as unmapped until the next sync or a restart, even after a reload. The unmapped list now filters out exercises that already have a mapping, and a saved mapping is dropped from the cached list right away. Thanks @KaiBoos.
+
+## [0.5.4] - 2026-06-25
+
+### Fixed
+- **Backfill not reaching older workouts** ([#165](https://github.com/drkostas/hevy2garmin/issues/165)). The "Sync N Workouts" backfill searched only the first few pages of Hevy history, so when the recent workouts were already synced and the unsynced ones were older, it stopped before finding them and reported done. It now scans the whole history. Together with the earlier fetch-by-ID fix, both the bulk backfill and the per-workout Upload reach any workout regardless of age.
+
+## [0.5.3] - 2026-06-24
+
+### Fixed
+- **Exercises showing as "Choose an Exercise" on watch-recorded activities** ([#159](https://github.com/drkostas/hevy2garmin/issues/159)). When you record a strength workout on your Garmin watch and the tool merges Hevy data into it, Garmin accepts the sets but ignores the exercise names, so every set stays "Choose an Exercise". The tool now verifies after the merge whether the names actually stuck. When Garmin drops them, it restores the watch activity and uploads a separate, properly named activity instead, so the exercises are named. Confirmed live against a real Garmin account.
+
+## [0.5.2] - 2026-06-24
+
+### Fixed
+- **"Workout not found" when syncing older workouts** ([#165](https://github.com/drkostas/hevy2garmin/issues/165)) — the per-workout Upload button and HR fetch now look up the exact workout by ID (`GET /v1/workouts/{id}`) instead of scanning only the first page of 10, so users with more than a page of history can sync any workout, not just recent ones.
+
+## [0.5.1] - 2026-06-23
+
+### Added
+- **Merge into non-strength watch activities** ([#157](https://github.com/drkostas/hevy2garmin/pull/157)) — a `merge_activity_types` setting (default `["strength_training"]`) lets Enhance Watch Activities fuse Hevy workouts into other Garmin activity types you record on the watch (e.g. Indoor Climbing), instead of creating a duplicate. Configure extra types under Settings → Enhance Watch Activities → Advanced. Thanks @braianrabanal.
+
+### Changed
+- **Garmin login is now mobile-first** ([#147](https://github.com/drkostas/hevy2garmin/issues/147), [garmin-auth#29](https://github.com/drkostas/garmin-auth/issues/29)) — the login worker tries Garmin's mobile/app endpoint first (the one built for native 2FA, so MFA accounts no longer take a portal→427→fallback detour) and **no longer retries the other endpoint on a rate limit**. Garmin's login limit is per-account across both endpoints, so the old fallback was deepening the throttle that wouldn't clear. Verified end-to-end on a real 2FA account (login → email MFA → tokens).
+
 ### Added
 - Version + changelog link in the dashboard footer ([#144](https://github.com/drkostas/hevy2garmin/issues/144)) — confirm which build you're running after an upgrade.
+- **Heart rate now embedded in the uploaded activity** ([#158](https://github.com/drkostas/hevy2garmin/issues/158)) — fetched HR is written into the FIT at real timestamps, so it appears on the Garmin Connect activity, not just the dashboard chart. New `hr.py` merges HR sources (in-workout/AirPods-preferred, Garmin watch fill); the merge is source-agnostic and ready for in-workout HR the moment Hevy exposes it via the API (it does not today). Gated by the existing HR-fusion toggle, cached, and best-effort (never breaks a sync).
 
 ### Fixed
 - **Serverless persistence** ([#145](https://github.com/drkostas/hevy2garmin/issues/145)) — custom exercise mappings and profile/settings now persist to Postgres on cloud deployments instead of the read-only `~/.hevy2garmin` filesystem. Fixes the 500 when saving a mapping on Vercel ([#142](https://github.com/drkostas/hevy2garmin/issues/142)), profile reverting to defaults / Pull-from-Garmin not sticking ([#139](https://github.com/drkostas/hevy2garmin/issues/139)), and the blank-dashboard crash on deploy without a database — now an actionable "set DATABASE_URL" error.

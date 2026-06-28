@@ -1,15 +1,9 @@
-"""Merge mode: combine a Hevy workout with a user-recorded Garmin activity.
+"""Merge mode: push Hevy exercise data into user-recorded Garmin activities.
 
-When a user records a Strength Training on their Garmin watch at the gym, this
-module detects the matching activity and applies the Hevy data using one of two
-strategies (config key ``merge_strategy``):
-
-* ``"exercise_sets"`` (default) — non-destructive: PUT Hevy's exercise/set data
-  onto the existing activity via the exerciseSets API. The watch's 1-second HR,
-  training effect, EPOC, and recovery stay intact.
-* ``"fit_replace"`` — regenerate a fresh FIT (watch HR + Hevy exercises), upload
-  it, and delete the original watch activity (gated by ``merge_delete_original``).
-  Renders exercise names reliably via FIT enums (drkostas/hevy2garmin#138).
+When a user records a Strength Training on their Garmin watch at the gym,
+this module detects the matching activity and PUTs Hevy's exercise/set data
+into it via the exerciseSets API. The watch's 1-second HR, training effect,
+EPOC, and recovery stay intact.
 
 Public API:
     attempt_merge(client, hevy_workout, db) -> MergeResult
@@ -18,24 +12,17 @@ Public API:
 from __future__ import annotations
 
 import logging
-import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from hevy2garmin.config import load_config
-from hevy2garmin.fit import generate_fit
 from hevy2garmin.garmin import (
-    delete_activity,
-    download_activity_fit,
-    extract_hr_samples,
     find_matching_garmin_activity,
     generate_description,
     get_activity_exercise_sets,
     push_exercise_sets,
     rename_activity,
     set_description,
-    upload_fit,
 )
 from hevy2garmin.mapper import lookup_exercise
 
@@ -52,6 +39,49 @@ class MergeResult:
     merged: bool
     activity_id: int | None = None
     fallback_reason: str | None = None
+    # Set when the merge pushed sets but Garmin dropped the exercise names on a
+    # watch-recorded activity (#159). Tells the caller to upload a SEPARATE
+    # named activity instead of deduping against the watch activity.
+    force_fresh_upload: bool = False
+    # Watch activity id to delete AFTER a successful fresh upload, so the workout
+    # ends up as a single named activity ("replace" strategy, #159).
+    delete_after_upload: int | None = None
+
+
+def _names_applied(client, activity_id) -> bool:
+    """Check whether Garmin actually kept the exercise identities after a PUT.
+
+    Watch-recorded strength activities accept the sets (HTTP 204) but silently
+    drop the exercise category/name, leaving every set as "Choose an Exercise"
+    (#159, confirmed live). Returns True if at least one active set came back
+    with a real category, False if the names were dropped. Returns True on any
+    read error so an unverifiable merge is not needlessly discarded.
+    """
+    time.sleep(4)  # let Garmin process the PUT before reading back
+    try:
+        after = get_activity_exercise_sets(client, activity_id)
+    except Exception:
+        return True
+    cats = [
+        e.get("category")
+        for s in (after.get("exerciseSets") or [])
+        if s.get("setType") == "ACTIVE"
+        for e in (s.get("exercises") or [])
+    ]
+    if not cats:
+        return False
+    return any(c and c != "UNKNOWN" for c in cats)
+
+
+def _restore_sets(client, activity_id, database) -> None:
+    """Restore an activity's pre-merge exercise sets from the backup."""
+    try:
+        backup = database.get_app_config(f"merge_backup_{activity_id}")
+        original = (backup or {}).get("original_sets")
+        if original and original.get("exerciseSets") is not None:
+            push_exercise_sets(client, activity_id, original)
+    except Exception as e:
+        logger.warning("Could not restore sets for %s: %s", activity_id, e)
 
 
 def reset_circuit_breaker() -> None:
@@ -198,7 +228,7 @@ def build_exercise_sets_payload(
         ex_idx = si["ex_idx"]
         ex = exercises[ex_idx]
 
-        cat_id, sub_id, _ = lookup_exercise(ex.get("title") or ex.get("name", "Unknown"))
+        cat_id, sub_id, _ = lookup_exercise(ex.get("title") or ex.get("name", "Unknown"), ex.get("exercise_template_id"))
         cat_str = _category_to_string(cat_id)
         sub_name = _exercise_to_string(cat_id, sub_id)
         # Garmin rejects an UNKNOWN category, so fall back to the generic
@@ -250,51 +280,44 @@ def build_exercise_sets_payload(
     return {"activityId": activity_id, "exerciseSets": exercise_sets}
 
 
+def _apply_name_and_description(client, activity_id, hevy_workout) -> None:
+    """Rename a Garmin activity to the Hevy title and set its exercise description."""
+    title = hevy_workout.get("title", "Workout")
+    rename_activity(client, activity_id, title)
+    desc = generate_description(hevy_workout)
+    note = "synced by hevy2garmin"
+    if not desc.rstrip().endswith(note):
+        desc = f"{desc}\n{note}"
+    set_description(client, activity_id, f"Exercises synced from Hevy by hevy2garmin\n\n{desc}")
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def attempt_merge(client, hevy_workout: dict, database, overlap_threshold: float = 0.70, max_drift_minutes: int = 20) -> MergeResult:
-    """Try to merge a Hevy workout into a matching watch-recorded Garmin activity.
+def attempt_merge(
+    client,
+    hevy_workout: dict,
+    database,
+    overlap_threshold: float = 0.70,
+    max_drift_minutes: int = 20,
+    activity_types: set[str] | None = None,
+    watch_strategy: str = "replace",
+) -> MergeResult:
+    """Try to merge Hevy exercise data into a matching Garmin activity.
 
-    Finds the overlapping watch activity, then applies the Hevy data using the
-    strategy named by the ``merge_strategy`` config key:
-
-    * ``"exercise_sets"`` (default) — :func:`_exercise_sets_merge`, non-destructive.
-    * ``"fit_replace"`` — :func:`_fit_replace_merge`, regenerate + replace.
-
-    Returns MergeResult(merged=True) on success, else merged=False with a
-    fallback_reason (no match, circuit breaker, upload/PUT failure).
-    """
-    if _circuit_breaker_tripped():
-        return MergeResult(merged=False, fallback_reason="Circuit breaker: too many failures")
-
-    match = find_matching_garmin_activity(
-        client, hevy_workout,
-        overlap_threshold=overlap_threshold,
-        max_drift_minutes=max_drift_minutes,
-    )
-    if not match:
-        return MergeResult(merged=False, fallback_reason="No matching Garmin activity found")
-
-    strategy = load_config().get("merge_strategy", "exercise_sets")
-    if strategy == "fit_replace":
-        return _fit_replace_merge(client, hevy_workout, database, match)
-    return _exercise_sets_merge(client, hevy_workout, database, match)
-
-
-# ---------------------------------------------------------------------------
-# Strategy: exercise_sets (PUT Hevy data onto the existing watch activity)
-# ---------------------------------------------------------------------------
-
-def _exercise_sets_merge(client, hevy_workout: dict, database, match: dict) -> MergeResult:
-    """Push Hevy exercise/set data onto the matched activity via the exerciseSets API.
-
-    Non-destructive: the watch's HR, training effect, EPOC and recovery stay
-    intact; only exercise/set data is added. Exercise names render via valid FIT
-    sub-category enums, or ``null`` under a valid parent category (#138).
+    Returns MergeResult with merged=True if successful, or merged=False
+    with a fallback_reason explaining why (no match, circuit breaker, etc.)
     """
     global _consecutive_failures
+
+    if _circuit_breaker_tripped():
+        return MergeResult(merged=False, fallback_reason="Circuit breaker: too many PUT failures")
+
+    # Find matching activity
+    match = find_matching_garmin_activity(client, hevy_workout, overlap_threshold=overlap_threshold, max_drift_minutes=max_drift_minutes, activity_types=activity_types)
+    if not match:
+        return MergeResult(merged=False, fallback_reason="No matching Garmin activity found")
 
     activity_id = match.get("activityId")
     act_start = match.get("startTimeGMT") or match.get("startTimeLocal", "")
@@ -302,6 +325,55 @@ def _exercise_sets_merge(client, hevy_workout: dict, database, match: dict) -> M
 
     if not activity_id or not act_start or not act_duration:
         return MergeResult(merged=False, fallback_reason="Matched activity missing required fields")
+
+    # Garmin only displays pushed exercise identities on activities hevy2garmin
+    # created itself (FIT manufacturer "DEVELOPMENT"). On device-recorded
+    # activities (a watch, manufacturer "GARMIN", etc.) the exerciseSets PUT
+    # returns 204 but Garmin ignores it, so the activity shows "Unknown" with no
+    # reps (#159, confirmed against the live API). Reading the sets back cannot
+    # detect this, since the read reflects stored, not displayed, state. So for
+    # any match we did not create, skip the merge and upload a fresh named
+    # activity instead. HR fusion still pulls the watch heart rate into it.
+    manufacturer = str(match.get("manufacturer") or "").upper()
+    is_watch = bool(manufacturer) and manufacturer != "DEVELOPMENT"
+    if is_watch and watch_strategy == "describe":
+        # Keep the single watch activity (its HR + device metrics) and just list
+        # the exercises in its description. No push (Garmin ignores names on watch
+        # activities) and no upload, so it stays one activity.
+        logger.info(
+            "  Match %s recorded by %s; enriching its description (watch_strategy=describe)",
+            activity_id, manufacturer,
+        )
+        try:
+            _apply_name_and_description(client, activity_id, hevy_workout)
+        except Exception as e:
+            logger.warning("Rename/description failed for %s: %s", activity_id, e)
+        return MergeResult(merged=True, activity_id=activity_id)
+
+    if is_watch and watch_strategy == "replace":
+        # Upload one named activity, then delete the watch recording, so the
+        # workout shows up exactly once with named exercises.
+        logger.info(
+            "  Match %s recorded by %s; uploading a named activity and removing the watch copy (watch_strategy=replace)",
+            activity_id, manufacturer,
+        )
+        return MergeResult(
+            merged=False,
+            force_fresh_upload=True,
+            delete_after_upload=activity_id,
+            fallback_reason=f"activity recorded by {manufacturer}; replacing it with a named upload",
+        )
+
+    if is_watch:
+        # watch_strategy == "merge": push the sets/reps/weights into the single
+        # watch activity, keeping all its native metrics (HR, training effect,
+        # body battery). Garmin will not display the exercise NAMES on a
+        # device-recorded activity, so they show as "Unknown", but the structured
+        # sets/reps/weights land in the activity. One activity, no upload/delete.
+        logger.info(
+            "  Match %s recorded by %s; merging sets in place, names may show as Unknown (watch_strategy=merge)",
+            activity_id, manufacturer,
+        )
 
     # Backup existing exercise sets
     try:
@@ -327,112 +399,27 @@ def _exercise_sets_merge(client, hevy_workout: dict, database, match: dict) -> M
         logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, e)
         return MergeResult(merged=False, fallback_reason=f"PUT failed: {e}")
 
+    # hevy2garmin's own uploads (DEVELOPMENT) display the pushed names, so verify
+    # there and fall back to a named upload if Garmin dropped them. For
+    # watch_strategy="merge" we intentionally keep the watch activity even though
+    # Garmin will not show the names, so skip the verify and keep the sets.
+    if not (is_watch and watch_strategy == "merge") and not _names_applied(client, activity_id):
+        logger.info(
+            "  Exercise names not applied on activity %s, restoring and uploading a named activity",
+            activity_id,
+        )
+        _restore_sets(client, activity_id, database)
+        return MergeResult(
+            merged=False,
+            force_fresh_upload=True,
+            fallback_reason="Garmin dropped exercise names on the watch-recorded activity",
+        )
+
     # Rename + set description
     try:
-        rename_activity(client, activity_id, title)
-        desc = generate_description(hevy_workout)
-        if not desc.endswith("— synced by hevy2garmin"):
-            desc += "\n— synced by hevy2garmin"
-        # Prepend merge note
-        desc = "⚡ Exercises synced from Hevy by hevy2garmin\n\n" + desc
-        set_description(client, activity_id, desc)
+        _apply_name_and_description(client, activity_id, hevy_workout)
     except Exception as e:
         logger.warning("Rename/description failed after merge for %s: %s", activity_id, e)
-        # Non-fatal — sets were already pushed
+        # Non-fatal, sets were already pushed
 
     return MergeResult(merged=True, activity_id=activity_id)
-
-
-# ---------------------------------------------------------------------------
-# Strategy: fit_replace (regenerate a FIT with watch HR, upload, delete original)
-# ---------------------------------------------------------------------------
-
-def _fit_replace_merge(client, hevy_workout: dict, database, match: dict) -> MergeResult:
-    """Replace the matched watch activity with a Hevy-sourced FIT carrying watch HR."""
-    global _consecutive_failures
-
-    original_id = match.get("activityId")
-    if not original_id:
-        return MergeResult(merged=False, fallback_reason="Matched activity missing activityId")
-
-    # 1. Pull watch HR from its original FIT (best effort).
-    watch_hr: list[int] | None
-    try:
-        fit_bytes = download_activity_fit(client, original_id)
-        samples = extract_hr_samples(fit_bytes)
-        watch_hr = samples if samples else None
-        if watch_hr:
-            logger.info("  Extracted %d HR samples from watch activity %s", len(watch_hr), original_id)
-        else:
-            logger.info("  Watch FIT for %s contained no HR records", original_id)
-    except Exception as e:
-        logger.warning("  Could not extract watch HR from %s: %s — uploading without watch HR", original_id, e)
-        watch_hr = None
-
-    # 2. Generate + upload the new FIT.
-    wid = hevy_workout.get("id", "unknown")
-    title = hevy_workout.get("title", "Workout")
-    start_time = hevy_workout.get("start_time") or hevy_workout.get("startTime", "")
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            fit_path = str(Path(tmp) / f"{wid}.fit")
-            result = generate_fit(hevy_workout, hr_samples=watch_hr, output_path=fit_path)
-            logger.info(
-                "  FIT: %d exercises, %d sets, %d cal",
-                result["exercises"], result["total_sets"], result["calories"],
-            )
-            upload_result = upload_fit(client, fit_path, workout_start=start_time)
-        _consecutive_failures = 0
-    except Exception as e:
-        _consecutive_failures += 1
-        logger.error("  FIT upload failed for workout %s: %s", wid, e)
-        return MergeResult(merged=False, fallback_reason=f"FIT upload failed: {e}")
-
-    new_id = upload_result.get("activity_id")
-    if not new_id:
-        # Upload returned 200 but we couldn't resolve the new activity ID.
-        # Don't delete the original — that would lose data.
-        logger.warning("  Upload succeeded but new activity ID not found; leaving original %s in place", original_id)
-        return MergeResult(merged=False, fallback_reason="Uploaded but new activity ID not resolved")
-
-    # 3. Rename + describe the new activity.
-    try:
-        rename_activity(client, new_id, title)
-        desc = generate_description(
-            hevy_workout,
-            calories=result.get("calories"),
-            avg_hr=result.get("avg_hr"),
-        )
-        if not desc.endswith("— synced by hevy2garmin"):
-            desc += "\n— synced by hevy2garmin"
-        desc = "⚡ Replaced by hevy2garmin (watch HR preserved)\n\n" + desc
-        set_description(client, new_id, desc)
-    except Exception as e:
-        logger.warning("  Rename/description failed for new activity %s: %s", new_id, e)
-        # Non-fatal — the upload itself succeeded.
-
-    # 4. Delete the original watch activity (configurable).
-    cfg = load_config()
-    if cfg.get("merge_delete_original", True):
-        try:
-            delete_activity(client, original_id)
-        except Exception as e:
-            logger.error(
-                "  Uploaded new activity %s but failed to delete original %s: %s. "
-                "You will have two strength activities at this timestamp.",
-                new_id, original_id, e,
-            )
-        else:
-            # Also remove from intervals.icu so the original doesn't linger as a
-            # duplicate when the new merged activity syncs from Garmin. Silent
-            # no-op unless INTERVALS_API_KEY / INTERVALS_ATHLETE_ID are set.
-            try:
-                from hevy2garmin.intervals_icu import try_delete_icu_activity
-                try_delete_icu_activity(original_id, start_time)
-            except Exception as e:
-                logger.warning("  ICU cleanup raised unexpectedly: %s", e)
-    else:
-        logger.info("  Kept original watch activity %s (merge_delete_original=False)", original_id)
-
-    return MergeResult(merged=True, activity_id=new_id)

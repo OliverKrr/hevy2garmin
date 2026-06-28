@@ -8,7 +8,6 @@ from __future__ import annotations
 import io
 import logging
 import time
-import zipfile
 from pathlib import Path
 
 from garminconnect import Garmin
@@ -196,6 +195,16 @@ def set_description(client: Garmin, activity_id: int, description: str) -> None:
     logger.info("  Description set (%d chars)", len(description))
 
 
+def delete_activity(client: Garmin, activity_id: int) -> None:
+    """Delete a Garmin activity.
+
+    Used to remove a watch-recorded activity after uploading a named
+    replacement, so the workout appears exactly once on Garmin (#159).
+    """
+    _limiter.call(client.delete_activity, activity_id)
+    logger.info("  Deleted activity %s", activity_id)
+
+
 def upload_image(client: Garmin, activity_id: int, image_bytes: bytes, filename: str = "image.png") -> None:
     """Upload an image to a Garmin activity."""
     files = {"file": (filename, io.BytesIO(image_bytes))}
@@ -213,15 +222,21 @@ def find_matching_garmin_activity(
     hevy_workout: dict,
     overlap_threshold: float = 0.70,
     max_drift_minutes: int = 20,
+    activity_types: set[str] | None = None,
 ) -> dict | None:
-    """Find a user-recorded Garmin Strength Training activity matching a Hevy workout.
+    """Find a user-recorded Garmin activity matching a Hevy workout.
 
     Searches for activities that overlap the Hevy workout's time window,
     then scores by temporal overlap and start-time proximity.
 
     Returns the best-matching activity dict, or None if nothing qualifies.
-    Only matches completed activities of type 'strength_training'.
+    Only matches completed activities whose ``activityType.typeKey`` is in
+    ``activity_types`` (default: ``{"strength_training"}``). Pass additional
+    types (e.g. ``"bouldering"``, ``"indoor_climbing"``) to also enhance
+    non-strength watch activities with Hevy exercise data.
     """
+    if activity_types is None:
+        activity_types = {"strength_training"}
     from datetime import datetime, timedelta, timezone
 
     start_raw = hevy_workout.get("start_time") or hevy_workout.get("startTime", "")
@@ -252,9 +267,9 @@ def find_matching_garmin_activity(
     best: dict | None = None
 
     for act in (activities or []):
-        # Hard filter: strength_training only
+        # Hard filter: only configured activity types are eligible for merge
         act_type = act.get("activityType", {}).get("typeKey", "")
-        if act_type != "strength_training":
+        if act_type not in activity_types:
             continue
 
         # Must be a completed activity (has duration)
@@ -329,46 +344,6 @@ def push_exercise_sets(client: Garmin, activity_id: int, payload: dict) -> None:
     time.sleep(1.0)  # manual rate limit
     client.client.request("PUT", "connectapi", url, json=payload)
     logger.info("  Pushed %d exercise sets to activity %s", len(payload.get("exerciseSets", [])), activity_id)
-
-
-def download_activity_fit(client: Garmin, activity_id: int) -> bytes:
-    """Download an activity's original FIT file and return its raw bytes.
-
-    Garmin returns the ORIGINAL format as a ZIP wrapping one or more files;
-    we pick the first .fit member.
-    """
-    from garminconnect import Garmin as _G
-    zip_bytes = _limiter.call(
-        client.download_activity, str(activity_id), _G.ActivityDownloadFormat.ORIGINAL
-    )
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        for name in zf.namelist():
-            if name.lower().endswith(".fit"):
-                return zf.read(name)
-    raise RuntimeError(f"No .fit file in download for activity {activity_id}")
-
-
-def extract_hr_samples(fit_bytes: bytes) -> list[int]:
-    """Walk a FIT file's records and collect heart_rate values from RecordMessages.
-
-    Returns a list of bpm ints in record order; empty list if the FIT has no HR.
-    """
-    from fit_tool.fit_file import FitFile
-    from fit_tool.profile.messages.record_message import RecordMessage
-
-    fit_file = FitFile.from_bytes(fit_bytes, check_crc=False)
-    samples: list[int] = []
-    for record in fit_file.records:
-        msg = record.message
-        if isinstance(msg, RecordMessage) and msg.heart_rate is not None:
-            samples.append(int(msg.heart_rate))
-    return samples
-
-
-def delete_activity(client: Garmin, activity_id: int) -> None:
-    """Delete a Garmin activity by ID."""
-    _limiter.call(client.delete_activity, str(activity_id))
-    logger.info("  Deleted activity %s", activity_id)
 
 
 def generate_description(workout: dict, calories: int | None = None, avg_hr: int | None = None) -> str:

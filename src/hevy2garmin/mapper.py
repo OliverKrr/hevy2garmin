@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 
+from hevy2garmin.template_map import TEMPLATE_TO_GARMIN
+
 # --------------------------------------------------------------------------- #
 # Mapping: Hevy exercise name  ->  (FIT exercise category, subcategory)
 # --------------------------------------------------------------------------- #
@@ -733,24 +735,34 @@ def save_custom_mapping(hevy_name: str, category: int, subcategory: int) -> None
     _custom_mappings[hevy_name] = (category, subcategory)
 
 
-def lookup_exercise(hevy_name: str) -> tuple[int, int, str]:
+def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int, int, str]:
     """Return ``(category, subcategory, display_name)`` for a Hevy exercise.
 
-    Resolution order: exact custom mapping, exact built-in mapping, then a
-    normalized fallback (case/space/punctuation-insensitive) against custom
-    then built-in. If nothing matches, returns sentinel category ``65534``.
-    The returned display name is always the original ``hevy_name``.
+    Resolution order:
+      1. Exact custom user mapping, keyed by the user's own exercise name.
+      2. Hevy ``exercise_template_id``, which is the same regardless of the
+         user's Hevy language, so non-English exercises map automatically (#173).
+      3. Exact built-in English-name table.
+      4. Normalized fallback (case/space/punctuation-insensitive) against custom
+         then built-in — resilient to formatting drift, never fuzzy.
+    Returns sentinel category ``65534`` if not found anywhere. The returned
+    display name is always the original ``hevy_name``.
     """
     _ensure_custom_loaded()
     # 1. Exact custom mapping (highest priority)
     if hevy_name in _custom_mappings:
         cat, subcat = _custom_mappings[hevy_name]
         return (cat, subcat, hevy_name)
-    # 2. Exact built-in mapping
+    # 2. Language-independent template-id match (#173)
+    if template_id:
+        pair = TEMPLATE_TO_GARMIN.get(template_id)
+        if pair is not None:
+            return (pair[0], pair[1], hevy_name)
+    # 3. Exact built-in English-name mapping
     pair = HEVY_TO_GARMIN.get(hevy_name)
     if pair is not None:
         return (pair[0], pair[1], hevy_name)
-    # 3. Normalized fallback — resilient to formatting drift, never fuzzy.
+    # 4. Normalized fallback — resilient to formatting drift, never fuzzy.
     norm = _normalize_name(hevy_name)
     if norm:
         for name, custom_pair in _custom_mappings.items():

@@ -12,6 +12,7 @@ from hevy2garmin import db
 from hevy2garmin.config import load_config
 from hevy2garmin.fit import generate_fit
 from hevy2garmin.garmin import (
+    delete_activity,
     find_activity_by_start_time,
     generate_description,
     get_client,
@@ -22,6 +23,12 @@ from hevy2garmin.garmin import (
 from hevy2garmin.hevy import HevyClient
 from hevy2garmin.mapper import lookup_exercise
 from hevy2garmin.merge import attempt_merge, reset_circuit_breaker, MergeResult
+
+try:  # rate-limit HR fetches like other Garmin data calls
+    from garmin_auth import RateLimiter
+    _hr_limiter = RateLimiter(delay=1.0)
+except Exception:  # pragma: no cover
+    _hr_limiter = None
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -116,6 +123,8 @@ def sync(
     merge_mode = cfg.get("merge_mode", True)
     merge_overlap_pct = cfg.get("merge_overlap_pct", 70) / 100.0  # convert % to decimal
     merge_max_drift_min = cfg.get("merge_max_drift_min", 20)
+    merge_activity_types = set(cfg.get("merge_activity_types", ["strength_training"]))
+    merge_watch_strategy = cfg.get("merge_watch_strategy", "replace")
     description_enabled = cfg.get("description_enabled", True)
     stats = {"synced": 0, "skipped": 0, "failed": 0, "total": len(workouts), "unmapped": [], "merged": 0, "merge_fallback": 0}
 
@@ -138,14 +147,16 @@ def sync(
         # Track unmapped exercises
         for ex in workout.get("exercises", []):
             ex_name = ex.get("title") or ex.get("name", "")
-            cat, _, _ = lookup_exercise(ex_name)
+            cat, _, _ = lookup_exercise(ex_name, ex.get("exercise_template_id"))
             if cat == 65534 and ex_name not in stats["unmapped"]:
                 stats["unmapped"].append(ex_name)
 
         try:
             # ── Merge mode: try to enhance a watch-recorded activity ──
+            merge_forced_fresh = False
+            merge_delete_id = None
             if merge_mode and garmin_client and not dry_run:
-                merge_result = attempt_merge(garmin_client, workout, db, overlap_threshold=merge_overlap_pct, max_drift_minutes=merge_max_drift_min)
+                merge_result = attempt_merge(garmin_client, workout, db, overlap_threshold=merge_overlap_pct, max_drift_minutes=merge_max_drift_min, activity_types=merge_activity_types, watch_strategy=merge_watch_strategy)
                 if merge_result.merged:
                     db.mark_synced(
                         hevy_id=wid,
@@ -161,11 +172,20 @@ def sync(
                 else:
                     logger.info("  Merge fallback: %s", merge_result.fallback_reason)
                     stats["merge_fallback"] += 1
+                    merge_forced_fresh = merge_result.force_fresh_upload
+                    merge_delete_id = merge_result.delete_after_upload
 
             # ── Standard upload path (FIT generation) ──
+            # Embed merged HR (AirPods-preferred, watch fill) so it reaches
+            # Garmin Connect, not just the dashboard (#158). Best-effort.
+            hr_samples = None
+            if not dry_run:
+                from hevy2garmin.hr import hr_for_sync
+                hr_samples = hr_for_sync(db, garmin_client, workout, cfg, _hr_limiter)
+
             with tempfile.TemporaryDirectory() as tmp:
                 fit_path = str(Path(tmp) / f"{wid}.fit")
-                result = generate_fit(workout, hr_samples=None, output_path=fit_path)
+                result = generate_fit(workout, hr_samples=hr_samples, output_path=fit_path)
                 logger.info(
                     "  FIT: %d exercises, %d sets, %d cal",
                     result["exercises"], result["total_sets"], result["calories"],
@@ -176,14 +196,34 @@ def sync(
                     stats["synced"] += 1
                     continue
 
-                # Dedup: check if activity already exists on Garmin
-                existing_id = find_activity_by_start_time(garmin_client, start_time) if start_time else None
+                # Dedup: check if activity already exists on Garmin. Skip the
+                # check when the merge wants a fresh upload (#159) — otherwise it
+                # would find the watch activity and refuse to upload the named one.
+                existing_id = None
+                if start_time and not merge_forced_fresh:
+                    existing_id = find_activity_by_start_time(garmin_client, start_time)
                 if existing_id:
                     logger.info("  Activity already on Garmin (%s), skipping upload", existing_id)
                     activity_id = existing_id
                 else:
                     upload_result = upload_fit(garmin_client, fit_path, workout_start=start_time)
                     activity_id = upload_result.get("activity_id")
+                    # "replace" strategy (#159): the named upload succeeded, so
+                    # delete the watch recording to keep a single activity.
+                    if activity_id and merge_delete_id:
+                        try:
+                            delete_activity(garmin_client, merge_delete_id)
+                            logger.info("  Removed watch copy %s (replaced by %s)", merge_delete_id, activity_id)
+                            # Also remove it from intervals.icu so the deleted watch
+                            # copy doesn't linger as a duplicate when the named
+                            # activity syncs across. No-op unless ICU creds are set.
+                            try:
+                                from hevy2garmin.intervals_icu import try_delete_icu_activity
+                                try_delete_icu_activity(merge_delete_id, start_time)
+                            except Exception as e:
+                                logger.warning("  ICU cleanup raised unexpectedly: %s", e)
+                        except Exception as e:
+                            logger.warning("Could not delete watch activity %s: %s", merge_delete_id, e)
 
                 if activity_id:
                     rename_activity(garmin_client, activity_id, title)
