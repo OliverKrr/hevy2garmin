@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -46,12 +47,20 @@ def _get_cat_names() -> dict[int, str]:
     }
 _jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
 
+# Path prefix when this app is served behind a reverse proxy that mounts it under
+# a sub-path (from the X-Forwarded-Prefix header, e.g. "/apps/hevy2garmin"); empty
+# when served at the root. Set per request by the middleware and handed to every
+# template so client-side fetch() URLs — which no proxy can rewrite — resolve
+# under the prefix instead of escaping to the origin root.
+_url_prefix: contextvars.ContextVar[str] = contextvars.ContextVar("url_prefix", default="")
+
 
 def _render(template_name: str, **ctx) -> HTMLResponse:
     t = _jinja_env.get_template(template_name)
     ctx.setdefault("auth_enabled", auth_enabled())
     ctx.setdefault("demo_mode", is_demo_mode())
     ctx.setdefault("version", __version__)
+    ctx.setdefault("url_prefix", _url_prefix.get())
     return HTMLResponse(t.render(**ctx))
 
 
@@ -300,6 +309,11 @@ async def check_setup(request: Request, call_next):
     path = request.url.path
     secret = os.environ.get("HEVY2GARMIN_SECRET")
 
+    # Remember the reverse-proxy sub-path (if any) for this request so templates
+    # can build client-side URLs under it. Trailing slash trimmed so callers
+    # concatenate a leading-slash path (prefix + "/api/...").
+    _url_prefix.set(request.headers.get("x-forwarded-prefix", "").rstrip("/"))
+
     # Static resources: pass through, no auth, no cookie
     if path == "/favicon.ico" or path.startswith("/static"):
         return await call_next(request)
@@ -353,7 +367,9 @@ async def login_page(request: Request):
     if not auth_enabled() or verify_session(request.cookies.get(SESSION_COOKIE)):
         return RedirectResponse("/")
     error = request.query_params.get("error")
-    return HTMLResponse(_jinja_env.get_template("login.html").render(error=error))
+    return HTMLResponse(
+        _jinja_env.get_template("login.html").render(error=error, url_prefix=_url_prefix.get())
+    )
 
 
 @app.post("/login")
@@ -365,7 +381,9 @@ async def login_submit(request: Request, password: str = Form(...)):
         next_url = "/"
     if not check_password(password):
         return HTMLResponse(
-            _jinja_env.get_template("login.html").render(error="Wrong password."),
+            _jinja_env.get_template("login.html").render(
+                error="Wrong password.", url_prefix=_url_prefix.get()
+            ),
             status_code=401,
         )
     response = RedirectResponse(next_url, status_code=303)
