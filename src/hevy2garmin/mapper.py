@@ -554,7 +554,6 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     #  CARRY (category 3)
     # ======================================================================= #
     "Farmers Walk":                             (3, 1),    # carry / farmers_walk
-    "Overhead Dumbbell Lunge":                  (3, 4),    # carry / overhead_carry (closest overhead lunge/carry)
 
     # ======================================================================= #
     #  WARM UP (category 31)
@@ -740,9 +739,11 @@ def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int
 
     Resolution order:
       1. Exact custom user mapping, keyed by the user's own exercise name.
-      2. Hevy ``exercise_template_id``, which is the same regardless of the
-         user's Hevy language, so non-English exercises map automatically (#173).
-      3. Exact built-in English-name table.
+      2. Exact built-in English-name table — reconciled against the FIT catalog,
+         so it is authoritative and wins over the template-id list below wherever
+         they disagree.
+      3. Hevy ``exercise_template_id`` (#173) — language-independent fallback for
+         names not in the English table (e.g. a non-English Hevy locale).
       4. Normalized fallback (case/space/punctuation-insensitive) against custom
          then built-in — resilient to formatting drift, never fuzzy.
     Returns sentinel category ``65534`` if not found anywhere. The returned
@@ -753,15 +754,18 @@ def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int
     if hevy_name in _custom_mappings:
         cat, subcat = _custom_mappings[hevy_name]
         return (cat, subcat, hevy_name)
-    # 2. Language-independent template-id match (#173)
+    # 2. Exact built-in English-name mapping. Our table is reconciled against the
+    #    FIT catalog, so it takes precedence over the upstream template-id list —
+    #    which still carries older, un-reconciled pairs — wherever they disagree.
+    pair = HEVY_TO_GARMIN.get(hevy_name)
+    if pair is not None:
+        return (pair[0], pair[1], hevy_name)
+    # 3. Language-independent template-id match (#173) — fallback for names the
+    #    English table does not carry (e.g. a non-English Hevy locale).
     if template_id:
         pair = TEMPLATE_TO_GARMIN.get(template_id)
         if pair is not None:
             return (pair[0], pair[1], hevy_name)
-    # 3. Exact built-in English-name mapping
-    pair = HEVY_TO_GARMIN.get(hevy_name)
-    if pair is not None:
-        return (pair[0], pair[1], hevy_name)
     # 4. Normalized fallback — resilient to formatting drift, never fuzzy.
     norm = _normalize_name(hevy_name)
     if norm:
