@@ -330,16 +330,17 @@ async def check_setup(request: Request, call_next):
             return RedirectResponse(f"/login?next={path}")
 
     # Auth check for POST /api/* endpoints (CSRF protection).
-    # Cron has its own Bearer token check. All others require the cookie or X-Api-Key.
-    if secret and request.method == "POST" and path.startswith("/api/") and path != "/api/cron/sync":
+    # /api/cron/* have their own Bearer token check. All others require the cookie or X-Api-Key.
+    if secret and request.method == "POST" and path.startswith("/api/") and not path.startswith("/api/cron/"):
         token = request.cookies.get("h2g_auth") or request.headers.get("x-api-key")
         if token != secret:
             from starlette.responses import Response
             return Response("Unauthorized", status_code=401)
 
     # Setup page and sync endpoints: skip the "is configured?" redirect
-    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/setup-actions",
-                "/api/garmin-ticket", "/api/garmin-login", "/api/garmin-login-mfa"):
+    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/cron/webhook",
+                "/api/setup-actions", "/api/garmin-ticket", "/api/garmin-login",
+                "/api/garmin-login-mfa"):
         response = await call_next(request)
     else:
         # Redirect to setup if not configured
@@ -1872,6 +1873,61 @@ async def cron_sync(request: Request, merge_only: bool = Query(False)):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     return await api_sync_one(request, merge_only=merge_only)
+
+
+# ── Hevy webhook receiver ────────────────────────────────────────────────────
+# Staged sync: wait for the paired watch activity to reach Garmin Connect,
+# try merge-only first, and only the last attempt falls back to a plain FIT
+# upload — so the workout is never left unsynced. State is in-memory only
+# (a restart drops pending retries); auto-sync is the safety net.
+WEBHOOK_DELAY_SECONDS = int(os.environ.get("WEBHOOK_DELAY_SECONDS", "300"))
+WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "600"))
+WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "3"))
+
+_webhook_tasks: set = set()  # strong refs — bare asyncio tasks get GC'd
+
+
+async def _webhook_sync(request: Request) -> None:
+    """Background worker behind /api/cron/webhook."""
+    import asyncio
+    import json
+
+    await asyncio.sleep(WEBHOOK_DELAY_SECONDS)
+    for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
+        is_last = attempt == WEBHOOK_MAX_ATTEMPTS
+        try:
+            resp = await api_sync_one(request, merge_only=not is_last)
+            data = json.loads(bytes(resp.body))
+        except Exception as e:
+            logger.error("Webhook sync attempt %d/%d failed: %s",
+                         attempt, WEBHOOK_MAX_ATTEMPTS, str(e)[:300])
+            return
+        if data.get("synced", 0) >= 1 or data.get("done") or not data.get("merge_pending"):
+            return
+        if not is_last:
+            await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
+
+
+@app.post("/api/cron/webhook")
+async def cron_webhook(request: Request):
+    """Hevy webhook endpoint (Hevy fires it when a workout is saved).
+
+    Hevy expects a 200 within 5 seconds, so this only validates the Bearer
+    token and schedules the staged sync in the background.
+    """
+    import asyncio
+    from fastapi.responses import JSONResponse
+
+    cron_secret = os.environ.get("CRON_SECRET")
+    if cron_secret:
+        auth = request.headers.get("authorization")
+        if auth != f"Bearer {cron_secret}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    task = asyncio.create_task(_webhook_sync(request))
+    _webhook_tasks.add(task)
+    task.add_done_callback(_webhook_tasks.discard)
+    return JSONResponse({"status": "accepted"})
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
