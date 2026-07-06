@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from hevy2garmin.db_interface import Database
+from hevy2garmin.db_interface import Database, NoWritableDatabaseError
 
 
 def _ts_newer(new_ts: str, old_ts: str) -> bool:
@@ -35,7 +35,7 @@ class SQLiteDatabase(Database):
             # Serverless (Vercel/Lambda) home is read-only — the cryptic
             # FileNotFoundError/OSError here is what users saw as a blank
             # dashboard / 500 on deploy (#145). Surface an actionable message.
-            raise RuntimeError(
+            raise NoWritableDatabaseError(
                 "Cannot create a local SQLite database under ~/.hevy2garmin on "
                 "this read-only filesystem. Serverless deployments need Postgres: "
                 "add a Neon database (Vercel → Storage) so DATABASE_URL / "

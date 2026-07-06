@@ -19,6 +19,7 @@ from fastapi.concurrency import run_in_threadpool
 from jinja2 import Environment, FileSystemLoader
 
 from hevy2garmin import db, __version__
+from hevy2garmin.db_interface import NoWritableDatabaseError
 from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
@@ -66,6 +67,37 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
 
 app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+_NO_DB_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hevy2garmin — database needed</title>
+<style>
+ body{margin:0;background:#0f1115;color:#e6e6e6;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+ .card{max-width:560px;margin:24px;padding:32px;background:#171a21;border:1px solid #262b36;border-radius:14px}
+ h1{margin:0 0 4px;font-size:20px}
+ p{color:#aab2c0}
+ ol{padding-left:20px} li{margin:8px 0}
+ code{background:#0f1115;border:1px solid #262b36;border-radius:6px;padding:1px 6px;font-size:14px}
+ a{color:#7aa2ff}
+</style></head><body><div class="card">
+ <h1>Almost there — hevy2garmin needs a database</h1>
+ <p>This deployment has no database attached yet. Serverless hosts have a read-only
+ filesystem, so the app can't fall back to a local file and needs Postgres.</p>
+ <ol>
+  <li>Open your project on <a href="https://vercel.com/dashboard" target="_blank" rel="noopener">Vercel</a>.</li>
+  <li>Go to the <b>Storage</b> tab and add a <b>Neon Postgres</b> database (it's free). This sets <code>POSTGRES_URL</code> automatically.</li>
+  <li>Go to <b>Deployments</b>, open the latest one, and click <b>Redeploy</b>.</li>
+ </ol>
+ <p>Once the database is connected and it redeploys, this page becomes your dashboard.</p>
+</div></body></html>"""
+
+
+@app.exception_handler(NoWritableDatabaseError)
+async def _no_database_handler(request: Request, exc: NoWritableDatabaseError) -> HTMLResponse:
+    """Render an actionable 'add a database' page instead of a raw 500 (#145, #142)."""
+    logger.warning("No writable database on %s: %s", request.url.path, exc)
+    return HTMLResponse(_NO_DB_PAGE, status_code=503)
 
 
 # ── Auto-sync state ─────────────────────────────────────────────────────────
