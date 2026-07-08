@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -11,9 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.concurrency import run_in_threadpool
 from jinja2 import Environment, FileSystemLoader
 
 from hevy2garmin import db, __version__
@@ -23,6 +25,7 @@ from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
 from hevy2garmin.sync import sync
+from hevy2garmin import garmin_login
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -46,12 +49,20 @@ def _get_cat_names() -> dict[int, str]:
     }
 _jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
 
+# Path prefix when this app is served behind a reverse proxy that mounts it under
+# a sub-path (from the X-Forwarded-Prefix header, e.g. "/apps/hevy2garmin"); empty
+# when served at the root. Set per request by the middleware and handed to every
+# template so client-side fetch() URLs — which no proxy can rewrite — resolve
+# under the prefix instead of escaping to the origin root.
+_url_prefix: contextvars.ContextVar[str] = contextvars.ContextVar("url_prefix", default="")
+
 
 def _render(template_name: str, **ctx) -> HTMLResponse:
     t = _jinja_env.get_template(template_name)
     ctx.setdefault("auth_enabled", auth_enabled())
     ctx.setdefault("demo_mode", is_demo_mode())
     ctx.setdefault("version", __version__)
+    ctx.setdefault("url_prefix", _url_prefix.get())
     return HTMLResponse(t.render(**ctx))
 
 
@@ -331,6 +342,11 @@ async def check_setup(request: Request, call_next):
     path = request.url.path
     secret = os.environ.get("HEVY2GARMIN_SECRET")
 
+    # Remember the reverse-proxy sub-path (if any) for this request so templates
+    # can build client-side URLs under it. Trailing slash trimmed so callers
+    # concatenate a leading-slash path (prefix + "/api/...").
+    _url_prefix.set(request.headers.get("x-forwarded-prefix", "").rstrip("/"))
+
     # Static resources: pass through, no auth, no cookie
     if path == "/favicon.ico" or path.startswith("/static"):
         return await call_next(request)
@@ -347,15 +363,17 @@ async def check_setup(request: Request, call_next):
             return RedirectResponse(f"/login?next={path}")
 
     # Auth check for POST /api/* endpoints (CSRF protection).
-    # Cron has its own Bearer token check. All others require the cookie or X-Api-Key.
-    if secret and request.method == "POST" and path.startswith("/api/") and path != "/api/cron/sync":
+    # /api/cron/* have their own Bearer token check. All others require the cookie or X-Api-Key.
+    if secret and request.method == "POST" and path.startswith("/api/") and not path.startswith("/api/cron/"):
         token = request.cookies.get("h2g_auth") or request.headers.get("x-api-key")
         if token != secret:
             from starlette.responses import Response
             return Response("Unauthorized", status_code=401)
 
     # Setup page and sync endpoints: skip the "is configured?" redirect
-    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/setup-actions", "/api/garmin-ticket"):
+    if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/cron/webhook",
+                "/api/setup-actions", "/api/garmin-ticket", "/api/garmin-login",
+                "/api/garmin-login-mfa"):
         response = await call_next(request)
     else:
         # Redirect to setup if not configured
@@ -383,7 +401,9 @@ async def login_page(request: Request):
     if not auth_enabled() or verify_session(request.cookies.get(SESSION_COOKIE)):
         return RedirectResponse("/")
     error = request.query_params.get("error")
-    return HTMLResponse(_jinja_env.get_template("login.html").render(error=error))
+    return HTMLResponse(
+        _jinja_env.get_template("login.html").render(error=error, url_prefix=_url_prefix.get())
+    )
 
 
 @app.post("/login")
@@ -395,7 +415,9 @@ async def login_submit(request: Request, password: str = Form(...)):
         next_url = "/"
     if not check_password(password):
         return HTMLResponse(
-            _jinja_env.get_template("login.html").render(error="Wrong password."),
+            _jinja_env.get_template("login.html").render(
+                error="Wrong password.", url_prefix=_url_prefix.get()
+            ),
             status_code=401,
         )
     response = RedirectResponse(next_url, status_code=303)
@@ -493,6 +515,10 @@ async def dashboard(request: Request):
 
 
 
+def _direct_garmin_login() -> bool:
+    return os.environ.get("H2G_DIRECT_GARMIN_LOGIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
     garmin_cooldown = 0
@@ -504,7 +530,8 @@ async def setup_page(request: Request):
     except Exception:
         pass
     return _render("setup.html", config=load_config(), is_cloud=bool(db.get_database_url()),
-                   garmin_cooldown=garmin_cooldown, garmin_cooldown_str=garmin_cooldown_str)
+                   garmin_cooldown=garmin_cooldown, garmin_cooldown_str=garmin_cooldown_str,
+                   direct_garmin_login=_direct_garmin_login())
 
 
 @app.post("/setup")
@@ -711,6 +738,32 @@ async def api_garmin_rate_limited(request: Request):
     except Exception as e:
         logger.warning("Could not record rate-limit: %s", e)
         return HTMLResponse(_json.dumps({"cooldown_seconds": 0}))
+
+
+@app.post("/api/garmin-login")
+async def garmin_login_begin(request: Request):
+    """Direct (Pi-side) Garmin login, step 1. Never sends the password off-host."""
+    from fastapi.responses import JSONResponse
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    if not email or not password:
+        return JSONResponse({"status": "error", "message": "Email and password required"}, status_code=400)
+    result = await run_in_threadpool(garmin_login.begin, email, password)
+    return JSONResponse(result)
+
+
+@app.post("/api/garmin-login-mfa")
+async def garmin_login_mfa(request: Request):
+    """Direct (Pi-side) Garmin login, step 2 — submit the MFA code."""
+    from fastapi.responses import JSONResponse
+    body = await request.json()
+    session_id = (body.get("session_id") or "").strip()
+    code = (body.get("code") or "").strip()
+    if not session_id or not code:
+        return JSONResponse({"status": "error", "message": "session_id and code required"}, status_code=400)
+    result = await run_in_threadpool(garmin_login.complete, session_id, code)
+    return JSONResponse(result)
 
 
 @app.get("/workouts", response_class=HTMLResponse)
@@ -1778,7 +1831,7 @@ async def api_setup_actions(request: Request):
 
 
 @app.post("/api/sync-one")
-async def api_sync_one(request: Request):
+async def api_sync_one(request: Request, merge_only: bool = Query(False)):
     """Sync exactly 1 unsynced workout. Returns JSON with status."""
     from fastapi.responses import JSONResponse
 
@@ -1790,7 +1843,7 @@ async def api_sync_one(request: Request):
 
     try:
         # Manual Sync Now — bypass grace so the user gets an immediate upload.
-        return await _do_sync_one(request, respect_grace=False)
+        return await _do_sync_one(request, respect_grace=False, merge_only=merge_only)
     finally:
         _sync_executing.release()
 
@@ -1832,11 +1885,12 @@ def _scan_for_unsynced(hevy, is_synced, total_count, failed_ids, on_page=None):
     return unsynced, unmapped
 
 
-async def _do_sync_one(request: Request, *, respect_grace: bool = False):
+async def _do_sync_one(request: Request, *, respect_grace: bool = False, merge_only: bool = False):
     """Inner sync logic, called with _sync_executing lock held.
 
     ``respect_grace`` is True for Vercel cron (wait for watch data) and False
-    for manual Sync Now.
+    for manual Sync Now. ``merge_only`` retries the watch-merge for an
+    already-uploaded workout instead of syncing a new one.
     """
     from fastapi.responses import JSONResponse
 
@@ -1923,6 +1977,7 @@ async def _do_sync_one(request: Request, *, respect_grace: bool = False):
                 cfg=config,
                 garmin_client=garmin_client,
                 respect_grace=False,  # already checked above
+                merge_only=merge_only,
                 database=db.get_db(),
             )
 
@@ -1978,11 +2033,17 @@ async def _do_sync_one(request: Request, *, respect_grace: bool = False):
 
 
 @app.get("/api/cron/sync")
-async def cron_sync(request: Request):
-    """Vercel cron endpoint. Syncs 1 workout per invocation."""
+async def cron_sync(request: Request, merge_only: bool = Query(False)):
+    """Cron/webhook endpoint. Syncs 1 workout per invocation.
+
+    merge_only=True: attempt merge with a Garmin watch activity but do NOT fall
+    back to a plain FIT upload if no match is found.  Used by the oauth_proxy
+    webhook retry loop to avoid marking a workout synced before the watch
+    activity has had time to sync to Garmin Connect.
+    """
     from fastapi.responses import JSONResponse
 
-    # Vercel sets CRON_SECRET to verify cron requests
+    # CRON_SECRET validates calls from nginx/oauth_proxy
     cron_secret = os.environ.get("CRON_SECRET")
     if cron_secret:
         auth = request.headers.get("authorization")
@@ -1997,9 +2058,64 @@ async def cron_sync(request: Request):
 
     try:
         # Cron/autosync — respect grace so watch activities can land first.
-        return await _do_sync_one(request, respect_grace=True)
+        return await _do_sync_one(request, respect_grace=True, merge_only=merge_only)
     finally:
         _sync_executing.release()
+
+
+# ── Hevy webhook receiver ────────────────────────────────────────────────────
+# Staged sync: wait for the paired watch activity to reach Garmin Connect,
+# try merge-only first, and only the last attempt falls back to a plain FIT
+# upload — so the workout is never left unsynced. State is in-memory only
+# (a restart drops pending retries); auto-sync is the safety net.
+WEBHOOK_DELAY_SECONDS = int(os.environ.get("WEBHOOK_DELAY_SECONDS", "300"))
+WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "600"))
+WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "3"))
+
+_webhook_tasks: set = set()  # strong refs — bare asyncio tasks get GC'd
+
+
+async def _webhook_sync(request: Request) -> None:
+    """Background worker behind /api/cron/webhook."""
+    import asyncio
+    import json
+
+    await asyncio.sleep(WEBHOOK_DELAY_SECONDS)
+    for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
+        is_last = attempt == WEBHOOK_MAX_ATTEMPTS
+        try:
+            resp = await api_sync_one(request, merge_only=not is_last)
+            data = json.loads(bytes(resp.body))
+        except Exception as e:
+            logger.error("Webhook sync attempt %d/%d failed: %s",
+                         attempt, WEBHOOK_MAX_ATTEMPTS, str(e)[:300])
+            return
+        if data.get("synced", 0) >= 1 or data.get("done") or not data.get("merge_pending"):
+            return
+        if not is_last:
+            await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
+
+
+@app.post("/api/cron/webhook")
+async def cron_webhook(request: Request):
+    """Hevy webhook endpoint (Hevy fires it when a workout is saved).
+
+    Hevy expects a 200 within 5 seconds, so this only validates the Bearer
+    token and schedules the staged sync in the background.
+    """
+    import asyncio
+    from fastapi.responses import JSONResponse
+
+    cron_secret = os.environ.get("CRON_SECRET")
+    if cron_secret:
+        auth = request.headers.get("authorization")
+        if auth != f"Bearer {cron_secret}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    task = asyncio.create_task(_webhook_sync(request))
+    _webhook_tasks.add(task)
+    task.add_done_callback(_webhook_tasks.discard)
+    return JSONResponse({"status": "accepted"})
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
