@@ -18,6 +18,8 @@ FIT SDK exercise categories used:
 
 from __future__ import annotations
 
+import re
+
 from hevy2garmin.template_map import TEMPLATE_TO_GARMIN
 
 # --------------------------------------------------------------------------- #
@@ -553,7 +555,6 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     #  CARRY (category 3)
     # ======================================================================= #
     "Farmers Walk":                             (3, 1),    # carry / farmers_walk
-    "Overhead Dumbbell Lunge":                  (3, 4),    # carry / overhead_carry (closest overhead lunge/carry)
 
     # ======================================================================= #
     #  WARM UP (category 31)
@@ -619,6 +620,16 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     # ======================================================================= #
     "Running":                                  (32, 0),   # run / run
     "Walking":                                  (32, 1),   # run / walk
+
+    # ======================================================================= #
+    #  Fork additions — exercises absent from the upstream table
+    # ======================================================================= #
+    "Walking Lunge (Sandbag)":                  (17, 79),   # lunge / weighted_walking_lunge (sandbag)
+    "Cable Core Pallof Press":                  (5, 6),     # core / cable_core_press (exact anti-rotation match)
+    "Sled Pull":                                (3, 65535), # carry / generic (no FIT sled exercise; loaded backward drag)
+    "Burpee Broad Jumps":                       (29, 0),    # total_body / burpee (broad-jump variant; no dedicated FIT name)
+    "Ski Erg":                                  (65534, 0), # unknown - no FIT ski-erg exercise
+    "Tibialis Raise (Wand/BW)":                 (65534, 0), # unknown - no FIT tibialis/dorsiflexion strength exercise
 
 }
 
@@ -704,28 +715,73 @@ def save_custom_mapping(hevy_name: str, category: int, subcategory: int) -> None
     _custom_mappings[hevy_name] = (category, subcategory)
 
 
+def _normalize_name(name: str) -> str:
+    """Collapse a Hevy title to its alphanumeric skeleton (lowercased).
+
+    Strips case, whitespace, and punctuation so minor title formatting drift
+    (e.g. ``Bench Press - Close Grip`` vs ``Bench Press – Close Grip``, extra
+    spaces, hyphen/parenthesis differences) still resolves. This is NOT fuzzy
+    matching: only exact alphanumeric matches collapse together, so two
+    distinct exercises never collide. Letter-level typos (``Palloff`` vs
+    ``Pallof``) remain misses by design — a wrong mapping is worse than UNKNOWN
+    for a sync tool.
+    """
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+# Lazily-built normalized index of the built-in table (static at runtime).
+_normalized_index: dict[str, tuple[int, int]] | None = None
+
+
+def _get_normalized_index() -> dict[str, tuple[int, int]]:
+    global _normalized_index
+    if _normalized_index is None:
+        index: dict[str, tuple[int, int]] = {}
+        for name, pair in HEVY_TO_GARMIN.items():
+            index.setdefault(_normalize_name(name), pair)
+        _normalized_index = index
+    return _normalized_index
+
+
 def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int, int, str]:
     """Return ``(category, subcategory, display_name)`` for a Hevy exercise.
 
     Resolution order:
-      1. Custom user mapping, keyed by the user's own exercise name.
-      2. Hevy ``exercise_template_id``, which is the same regardless of the
-         user's Hevy language, so non-English exercises map automatically (#173).
-      3. The built-in English-name table.
-    Returns sentinel category ``65534`` if not found anywhere.
+      1. Exact custom user mapping, keyed by the user's own exercise name.
+      2. Exact built-in English-name table. It is reconciled against the FIT
+         catalog and takes precedence over the template-id list below, which
+         still carries older, un-reconciled pairs (e.g. upstream generalised
+         cardio to a generic subcategory in the table but not in template_map),
+         wherever they disagree.
+      3. Hevy ``exercise_template_id`` (#173) — language-independent fallback for
+         names the English table does not carry (e.g. a non-English Hevy locale).
+      4. Normalized fallback (case/space/punctuation-insensitive) against custom
+         then built-in — resilient to formatting drift, never fuzzy.
+    Returns sentinel category ``65534`` if not found anywhere. The returned
+    display name is always the original ``hevy_name``.
     """
     _ensure_custom_loaded()
-    # Custom mappings take priority
+    # 1. Exact custom mapping (highest priority)
     if hevy_name in _custom_mappings:
         cat, subcat = _custom_mappings[hevy_name]
         return (cat, subcat, hevy_name)
-    # Language-independent template-id match
+    # 2. Exact built-in English-name mapping (authoritative over template-id)
+    pair = HEVY_TO_GARMIN.get(hevy_name)
+    if pair is not None:
+        return (pair[0], pair[1], hevy_name)
+    # 3. Language-independent template-id match (#173) — fallback for names the
+    #    English table does not carry (e.g. a non-English Hevy locale).
     if template_id:
         pair = TEMPLATE_TO_GARMIN.get(template_id)
         if pair is not None:
             return (pair[0], pair[1], hevy_name)
-    # Built-in English-name mappings
-    pair = HEVY_TO_GARMIN.get(hevy_name)
-    if pair is not None:
-        return (pair[0], pair[1], hevy_name)
+    # 4. Normalized fallback — resilient to formatting drift, never fuzzy.
+    norm = _normalize_name(hevy_name)
+    if norm:
+        for name, custom_pair in _custom_mappings.items():
+            if _normalize_name(name) == norm:
+                return (custom_pair[0], custom_pair[1], hevy_name)
+        pair = _get_normalized_index().get(norm)
+        if pair is not None:
+            return (pair[0], pair[1], hevy_name)
     return (_UNKNOWN_CATEGORY, _UNKNOWN_SUBCATEGORY, hevy_name)
