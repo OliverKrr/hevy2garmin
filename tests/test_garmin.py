@@ -71,6 +71,33 @@ class TestFindActivityByStartTime:
             result = find_activity_by_start_time(client, "2026-04-01T20:00:00+00:00", window_minutes=10)
             assert result is None
 
+    def test_exclude_id_skips_watch_copy(self) -> None:
+        """The "replace" race guard (#159): when the only same-start activity is
+        the watch copy we're about to delete, excluding it must return None (the
+        new upload isn't processed yet) rather than resolving to the watch id —
+        otherwise the caller deletes it and then renames a deleted activity (404)."""
+        client = MagicMock()
+        acts = self._make_activities("2026-04-01 20:00:00")  # single act, activityId=1
+        with patch("hevy2garmin.garmin._limiter") as mock_limiter:
+            mock_limiter.call.return_value = acts
+            # Without exclusion it resolves to the watch copy (the bug).
+            assert find_activity_by_start_time(client, "2026-04-01T20:00:00+00:00") == 1
+            # Excluding the watch copy: no other match → None, never the watch id.
+            assert find_activity_by_start_time(
+                client, "2026-04-01T20:00:00+00:00", exclude_activity_ids=[1]
+            ) is None
+
+    def test_exclude_id_still_finds_the_new_activity(self) -> None:
+        """With the watch copy excluded, a second same-start activity (the freshly
+        uploaded one) is resolved correctly."""
+        client = MagicMock()
+        acts = self._make_activities("2026-04-01 20:00:00", "2026-04-01 20:00:00")  # ids 1 and 2
+        with patch("hevy2garmin.garmin._limiter") as mock_limiter:
+            mock_limiter.call.return_value = acts
+            assert find_activity_by_start_time(
+                client, "2026-04-01T20:00:00+00:00", exclude_activity_ids=[1]
+            ) == 2
+
     def test_no_activities(self) -> None:
         client = MagicMock()
         with patch("hevy2garmin.garmin._limiter") as mock_limiter:

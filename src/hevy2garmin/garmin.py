@@ -83,8 +83,10 @@ def upload_fit(
         client: Authenticated Garmin client.
         fit_path: Path to the .fit file.
         workout_start: ISO-8601 start time for matching the uploaded activity.
-        exclude_activity_ids: Activities that existed before the upload. These
-            must not be mistaken for the newly imported activity.
+        exclude_activity_ids: Activities that existed before the upload (e.g.
+            the "replace" watch copy, which shares the start time and is about
+            to be deleted). These must not be mistaken for the newly imported
+            activity.
 
     Returns dict with upload_id and activity_id (if found).
     """
@@ -128,9 +130,19 @@ def upload_fit(
     else:
         logger.info("  Upload response: %s", str(resp)[:200])
 
+    # Never treat a pre-existing activity (e.g. the to-be-deleted watch copy)
+    # as the uploaded activity, even if Garmin echoed its id back on the
+    # import response.
+    if activity_id is not None and exclude_activity_ids and str(activity_id) in {
+        str(excluded) for excluded in exclude_activity_ids
+    }:
+        activity_id = None
+
     # Find the activity ID for renaming (retry with backoff if needed).
     # Only match by start time — never grab "most recent activity" because
-    # that can pick up an unrelated run/ride and rename the wrong thing.
+    # that can pick up an unrelated run/ride and rename the wrong thing. Skip the
+    # watch copy (exclude_activity_ids) so "replace" resolves the NEW upload, not
+    # the pre-existing device activity that shares this start time (#159 race).
     if not activity_id and workout_start:
         for attempt, wait in enumerate([3, 5, 10], 1):
             time.sleep(wait)
@@ -198,7 +210,11 @@ def find_activity_by_start_time(
     """Find a Garmin activity matching a start time within a window.
 
     Searches by date range so old uploaded workouts are found regardless of
-    how many newer activities exist on the account.
+    how many newer activities exist on the account. ``exclude_activity_ids``
+    skips specific activities — used by the "replace" strategy so that
+    resolving a freshly-uploaded activity does not return the watch copy that
+    shares the same start time and is about to be deleted (which otherwise
+    makes the code rename an activity it just removed → 404).
     """
     from datetime import timedelta
 
