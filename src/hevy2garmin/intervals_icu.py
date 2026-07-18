@@ -24,7 +24,8 @@ _BASE_URL = "https://intervals.icu"
 def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool:
     """Delete the intervals.icu activity that corresponds to garmin_activity_id.
 
-    Intervals.icu stores Garmin activities with external_id "G{garminId}".
+    Intervals.icu stores Garmin activities with the plain numeric activity id
+    as external_id (a legacy "G{garminId}" form is matched too, just in case).
     Searches a ±2-hour window around workout_start to locate the activity,
     then deletes it.
 
@@ -38,7 +39,7 @@ def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool
 
     base_url = os.environ.get("INTERVALS_BASE_URL", _BASE_URL).rstrip("/")
     auth = ("API_KEY", api_key)
-    target_external_id = f"G{garmin_activity_id}"
+    target_external_ids = {str(garmin_activity_id), f"G{garmin_activity_id}"}
 
     try:
         start = datetime.fromisoformat(workout_start.replace("Z", "+00:00"))
@@ -66,12 +67,15 @@ def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool
 
     icu_id = None
     for act in activities:
-        if act.get("external_id") == target_external_id:
+        if str(act.get("external_id")) in target_external_ids:
             icu_id = act.get("id")
             break
 
     if icu_id is None:
-        logger.debug("ICU cleanup: no activity with external_id=%s in window %s–%s", target_external_id, oldest, newest)
+        logger.warning(
+            "ICU cleanup: no activity with external_id=%s in window %s–%s — a stale duplicate may remain on intervals.icu",
+            garmin_activity_id, oldest, newest,
+        )
         return False
 
     try:
@@ -81,7 +85,7 @@ def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool
             timeout=15,
         )
         resp.raise_for_status()
-        logger.info("  ICU cleanup: deleted activity %s (external_id=%s)", icu_id, target_external_id)
+        logger.info("  ICU cleanup: deleted activity %s (garmin_id=%s)", icu_id, garmin_activity_id)
         return True
     except Exception as e:
         logger.warning("ICU cleanup: failed to delete activity %s: %s", icu_id, e)

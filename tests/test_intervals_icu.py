@@ -61,6 +61,24 @@ def test_found_activity_is_deleted(icu_env):
         assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/222"
 
 
+def test_plain_numeric_external_id_is_deleted(icu_env):
+    # intervals.icu reports Garmin activities with a plain numeric external_id
+    # (no "G" prefix) — observed live 2026-07: {"external_id": "23633234350",
+    # "source": "GARMIN_CONNECT"}. The cleanup must match that form too.
+    activities = [
+        {"id": "i166661330", "external_id": "23632538775", "source": "GARMIN_CONNECT"},
+        {"id": "i166677402", "external_id": "23633234350", "source": "GARMIN_CONNECT"},
+    ]
+    with patch("hevy2garmin.intervals_icu.requests") as req:
+        req.get.return_value = _resp(json_data=activities)
+        req.delete.return_value = _resp()
+
+        assert try_delete_icu_activity(23633234350, START) is True
+
+        del_args, _ = req.delete.call_args
+        assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/i166677402"
+
+
 def test_not_found_does_not_delete(icu_env):
     with patch("hevy2garmin.intervals_icu.requests") as req:
         req.get.return_value = _resp(json_data=[{"id": 1, "external_id": "Gother"}])
