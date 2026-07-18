@@ -79,8 +79,10 @@ def try_delete_icu_activity(garmin_activity_id: int, workout_start: str) -> bool
         return False
 
     try:
+        # Single-activity operations live under /api/v1/activity/{id} —
+        # the athlete-scoped path only supports listing (DELETE there is a 405).
         resp = requests.delete(
-            f"{base_url}/api/v1/athlete/{athlete_id}/activities/{icu_id}",
+            f"{base_url}/api/v1/activity/{icu_id}",
             auth=auth,
             timeout=15,
         )

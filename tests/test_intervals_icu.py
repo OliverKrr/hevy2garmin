@@ -56,9 +56,10 @@ def test_found_activity_is_deleted(icu_env):
         assert get_kwargs["auth"] == ("API_KEY", "secret")
         assert get_kwargs["params"] == {"oldest": "2026-03-15", "newest": "2026-03-15"}
 
-        # DELETE targeted the matched ICU id (222), not the Garmin id.
+        # DELETE targeted the matched ICU id (222), not the Garmin id, on the
+        # single-activity endpoint (the athlete-scoped path 405s on DELETE).
         del_args, _ = req.delete.call_args
-        assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/222"
+        assert del_args[0] == "https://intervals.icu/api/v1/activity/222"
 
 
 def test_plain_numeric_external_id_is_deleted(icu_env):
@@ -76,7 +77,7 @@ def test_plain_numeric_external_id_is_deleted(icu_env):
         assert try_delete_icu_activity(23633234350, START) is True
 
         del_args, _ = req.delete.call_args
-        assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/i166677402"
+        assert del_args[0] == "https://intervals.icu/api/v1/activity/i166677402"
 
 
 def test_not_found_does_not_delete(icu_env):
@@ -114,4 +115,4 @@ def test_zero_icu_id_is_deleted(icu_env):
         req.delete.return_value = _resp()
         assert try_delete_icu_activity(999, START) is True
         del_args, _ = req.delete.call_args
-        assert del_args[0] == "https://intervals.icu/api/v1/athlete/i12345/activities/0"
+        assert del_args[0] == "https://intervals.icu/api/v1/activity/0"
