@@ -62,14 +62,14 @@ class TestWebhookWorker:
 
         calls: list[bool] = []
 
-        async def fake_sync_one(request, merge_only=False):
+        async def fake_sync_one(request, merge_only=False, **kwargs):
             calls.append(merge_only)
             return JSONResponse(responses[len(calls) - 1])
 
         with (
             patch.object(server, "WEBHOOK_DELAY_SECONDS", 0),
             patch.object(server, "WEBHOOK_RETRY_INTERVAL_SECONDS", 0),
-            patch.object(server, "api_sync_one", fake_sync_one),
+            patch.object(server, "_sync_one_recorded", fake_sync_one),
         ):
             asyncio.run(server._webhook_sync(None))
         return calls
@@ -86,3 +86,39 @@ class TestWebhookWorker:
     def test_stops_when_nothing_is_pending(self) -> None:
         calls = self._run([{"synced": 0, "merge_pending": False, "done": False}])
         assert calls == [True]
+
+
+class TestSyncLogRecording:
+    """Every trigger path records a sync_log row (dashboard/webhook syncs
+    used to leave no trace in /history)."""
+
+    def _record_for(self, trigger_kwargs: dict, payload: dict) -> tuple[dict, str]:
+        from hevy2garmin import server
+
+        recorded: list = []
+
+        async def fake_do_sync_one(request, *, respect_grace=False, merge_only=False):
+            return JSONResponse(payload)
+
+        with (
+            patch.object(server, "_do_sync_one", fake_do_sync_one),
+            patch.object(server, "_record_sync_log", lambda result, trigger: recorded.append((result, trigger))),
+            patch.object(server, "is_demo_mode", lambda: False),
+        ):
+            asyncio.run(server._sync_one_recorded(None, **trigger_kwargs))
+        assert len(recorded) == 1
+        return recorded[0]
+
+    def test_webhook_trigger_recorded(self) -> None:
+        result, trigger = self._record_for(
+            {"trigger": "webhook"}, {"synced": 1, "done": True}
+        )
+        assert trigger == "webhook"
+        assert result["synced"] == 1
+
+    def test_error_recorded_as_failed(self) -> None:
+        result, trigger = self._record_for(
+            {"trigger": "manual (one)"}, {"synced": 0, "skipped_error": True, "title": "x"}
+        )
+        assert trigger == "manual (one)"
+        assert result["failed"] == 1

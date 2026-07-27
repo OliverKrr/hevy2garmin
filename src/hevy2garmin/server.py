@@ -1366,7 +1366,7 @@ async def api_sync_single(request: Request, workout_id: str):
 
         garmin_client = get_client(config.get("garmin_email"))
         # Manual single-workout upload from the workouts page — bypass grace.
-        sync_one_workout(
+        one = sync_one_workout(
             workout,
             cfg=config,
             garmin_client=garmin_client,
@@ -1374,10 +1374,16 @@ async def api_sync_single(request: Request, workout_id: str):
             respect_grace=False,
             database=db.get_db(),
         )
+        _record_sync_log(
+            {"synced": 1 if one.status == "synced" else 0,
+             "failed": 1 if one.status == "failed" else 0},
+            trigger="manual (single)",
+        )
 
         start = (workout.get("start_time") or "")[:16]
         return HTMLResponse(f'<tr><td><span class="badge badge-success">✓ Synced</span></td><td>{start}</td><td><strong>{workout["title"]}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
     except Exception as e:
+        _record_sync_log({"failed": 1}, trigger="manual (single)")
         return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {e}</td>')
 
 
@@ -1833,6 +1839,26 @@ async def api_setup_actions(request: Request):
 @app.post("/api/sync-one")
 async def api_sync_one(request: Request, merge_only: bool = Query(False)):
     """Sync exactly 1 unsynced workout. Returns JSON with status."""
+    # Manual Sync Now — bypass grace so the user gets an immediate upload.
+    return await _sync_one_recorded(
+        request, respect_grace=False, merge_only=merge_only, trigger="manual (one)"
+    )
+
+
+async def _sync_one_recorded(
+    request: Request,
+    *,
+    respect_grace: bool = False,
+    merge_only: bool = False,
+    trigger: str = "manual (one)",
+):
+    """Locked single-workout sync + sync_log record.
+
+    Shared by Sync Now, the cron endpoint, and the webhook worker so every
+    trigger shows up in the /history sync log — dashboard and webhook syncs
+    used to leave no trace, which made "who ran this sync?" unanswerable.
+    """
+    import json as _json
     from fastapi.responses import JSONResponse
 
     if is_demo_mode():
@@ -1842,10 +1868,17 @@ async def api_sync_one(request: Request, merge_only: bool = Query(False)):
         return JSONResponse({"error": "Sync already running", "busy": True})
 
     try:
-        # Manual Sync Now — bypass grace so the user gets an immediate upload.
-        return await _do_sync_one(request, respect_grace=False, merge_only=merge_only)
+        resp = await _do_sync_one(request, respect_grace=respect_grace, merge_only=merge_only)
     finally:
         _sync_executing.release()
+
+    try:
+        data = _json.loads(bytes(resp.body))
+        failed = 1 if (data.get("error") or data.get("skipped_error")) else 0
+        _record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
+    except Exception:
+        logger.debug("sync_log record failed", exc_info=True)
+    return resp
 
 
 def _scan_for_unsynced(hevy, is_synced, total_count, failed_ids, on_page=None):
@@ -2050,17 +2083,10 @@ async def cron_sync(request: Request, merge_only: bool = Query(False)):
         if auth != f"Bearer {cron_secret}":
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    if is_demo_mode():
-        return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
-
-    if not _acquire_sync_lock():
-        return JSONResponse({"error": "Sync already running", "busy": True})
-
-    try:
-        # Cron/autosync — respect grace so watch activities can land first.
-        return await _do_sync_one(request, respect_grace=True, merge_only=merge_only)
-    finally:
-        _sync_executing.release()
+    # Cron/autosync — respect grace so watch activities can land first.
+    return await _sync_one_recorded(
+        request, respect_grace=True, merge_only=merge_only, trigger="cron"
+    )
 
 
 # ── Hevy webhook receiver ────────────────────────────────────────────────────
@@ -2084,16 +2110,28 @@ async def _webhook_sync(request: Request) -> None:
     for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
         is_last = attempt == WEBHOOK_MAX_ATTEMPTS
         try:
-            resp = await api_sync_one(request, merge_only=not is_last)
+            resp = await _sync_one_recorded(
+                request, merge_only=not is_last, trigger="webhook"
+            )
             data = json.loads(bytes(resp.body))
         except Exception as e:
             logger.error("Webhook sync attempt %d/%d failed: %s",
                          attempt, WEBHOOK_MAX_ATTEMPTS, str(e)[:300])
             return
         if data.get("synced", 0) >= 1 or data.get("done") or not data.get("merge_pending"):
+            logger.info(
+                "Webhook sync attempt %d/%d: %s",
+                attempt,
+                WEBHOOK_MAX_ATTEMPTS,
+                f"synced '{data.get('title', '?')}'" if data.get("synced") else "nothing pending",
+            )
             return
         if not is_last:
             await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
+    logger.warning(
+        "Webhook sync: workout still pending after %d attempts — auto-sync fallback will retry",
+        WEBHOOK_MAX_ATTEMPTS,
+    )
 
 
 @app.post("/api/cron/webhook")
@@ -2110,8 +2148,14 @@ async def cron_webhook(request: Request):
     if cron_secret:
         auth = request.headers.get("authorization")
         if auth != f"Bearer {cron_secret}":
+            logger.warning("Hevy webhook rejected: bad or missing Authorization header")
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
+    logger.info(
+        "Hevy webhook received — staged sync in %ds (up to %d attempts)",
+        WEBHOOK_DELAY_SECONDS,
+        WEBHOOK_MAX_ATTEMPTS,
+    )
     task = asyncio.create_task(_webhook_sync(request))
     _webhook_tasks.add(task)
     task.add_done_callback(_webhook_tasks.discard)
