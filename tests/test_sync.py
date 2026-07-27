@@ -349,36 +349,53 @@ class TestSyncOneWorkout:
                 sync_method="merge",
             )
 
-    def test_watch_replacement_requires_backup_even_with_hr_fusion_off(
+    def test_watch_replacement_falls_back_to_merge_when_hr_unextractable(
         self, sample_workout: dict
     ) -> None:
-        from hevy2garmin.hr import HRBackupError
+        # Regression #244: when Replace cannot preserve the watch's hi-res HR, it
+        # must NOT hard-abort and must NOT delete the watch activity. It falls
+        # back to merging the sets into the watch in place (keeps the watch and
+        # its HR), so the sync still succeeds and no HR is lost.
+        mock_db = MagicMock()
+        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
+             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]) as backup, \
+             patch("hevy2garmin.sync._estimate_fit_stats", return_value={"calories": 100, "avg_hr": 90}), \
+             patch("hevy2garmin.sync.generate_fit") as generate_fit, \
+             patch("hevy2garmin.sync.upload_fit") as upload_fit:
+            mock_merge.side_effect = [
+                MergeResult(
+                    merged=False,
+                    force_fresh_upload=True,
+                    delete_after_upload=444,
+                    fallback_reason="watch replacement",
+                ),
+                MergeResult(merged=True, activity_id=444),
+            ]
 
-        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, patch(
-            "hevy2garmin.hr.require_activity_hr_backup",
-            side_effect=HRBackupError("source activity preserved"),
-        ) as require_backup, patch("hevy2garmin.sync.generate_fit") as generate_fit:
-            mock_merge.return_value = MergeResult(
-                merged=False,
-                force_fresh_upload=True,
-                delete_after_upload=444,
-                fallback_reason="watch replacement",
+            result = sync_one_workout(
+                sample_workout,
+                cfg={
+                    "merge_mode": True,
+                    "merge_watch_strategy": "replace",
+                    "hr_fusion": {"enabled": False},
+                },
+                garmin_client=MagicMock(),
+                database=mock_db,
             )
 
-            with pytest.raises(HRBackupError, match="source activity preserved"):
-                sync_one_workout(
-                    sample_workout,
-                    cfg={
-                        "merge_mode": True,
-                        "merge_watch_strategy": "replace",
-                        "hr_fusion": {"enabled": False},
-                    },
-                    garmin_client=MagicMock(),
-                    database=MagicMock(),
-                )
-
-        require_backup.assert_called_once()
+        # HR backup was attempted (data-safety intent preserved) ...
+        backup.assert_called_once()
+        # ... but no hard abort, no fresh upload, and no watch deletion.
         generate_fit.assert_not_called()
+        upload_fit.assert_not_called()
+        # Fell back to an in-place merge (second attempt_merge, watch_strategy=merge).
+        assert mock_merge.call_count == 2
+        assert mock_merge.call_args_list[1].kwargs["watch_strategy"] == "merge"
+        assert result.status == "synced"
+        assert result.sync_method == "merge"
+        assert result.merged is True
+        assert result.activity_id == 444
+        mock_db.mark_synced.assert_called_once()
 
     def test_description_disabled_skips_set_description(self, sample_workout: dict) -> None:
         with patch("hevy2garmin.sync.db") as mock_db, \

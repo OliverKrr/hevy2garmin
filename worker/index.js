@@ -31,6 +31,9 @@ export default {
       return Response.json({ error: "POST only" }, { status: 405, headers: corsHeaders });
     }
 
+    const path = new URL(request.url).pathname.replace(/\/$/, "");
+    if (path === "/oauth2") return handleOauth2Refresh(request);
+
     try {
       const { ticket } = await request.json();
       if (!ticket) {
@@ -128,6 +131,53 @@ export default {
     }
   },
 };
+
+/**
+ * POST /oauth2 { oauth_token, oauth_token_secret }
+ * Refresh a garth OAuth1 token to a fresh OAuth2 token (the oauth1→oauth2 step)
+ * from Cloudflare's egress. Garmin rate-limits this exchange from cloud (AWS /
+ * GitHub Actions) IPs, which is why soma's Strava bridge cron needs this proxy.
+ * facterino's oauth1.mfa_token is null, so the exchange body is empty — matching
+ * the ticket-flow step 3 above exactly.
+ */
+async function handleOauth2Refresh(request) {
+  try {
+    const { oauth_token, oauth_token_secret } = await request.json();
+    if (!oauth_token || !oauth_token_secret) {
+      return Response.json({ error: "Missing oauth1 token" }, { status: 400, headers: corsHeaders });
+    }
+    const consumerResp = await fetch(CONSUMER_URL);
+    const consumer = await consumerResp.json();
+    const exchangeUrl = `${API_BASE}/oauth-service/oauth/exchange/user/2.0`;
+    const header = buildOAuth1Header(
+      "POST", exchangeUrl, consumer.consumer_key, consumer.consumer_secret, oauth_token, oauth_token_secret
+    );
+    const resp = await fetch(exchangeUrl, {
+      method: "POST",
+      headers: {
+        Authorization: header,
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      return Response.json(
+        { error: `oauth2 exchange ${resp.status}: ${text.slice(0, 200)}` },
+        { status: 502, headers: corsHeaders }
+      );
+    }
+    const oauth2 = await resp.json();
+    const now = Math.floor(Date.now() / 1000);
+    if (oauth2.expires_in && !oauth2.expires_at) oauth2.expires_at = now + oauth2.expires_in;
+    if (oauth2.refresh_token_expires_in && !oauth2.refresh_token_expires_at) {
+      oauth2.refresh_token_expires_at = now + oauth2.refresh_token_expires_in;
+    }
+    return Response.json({ oauth2 }, { headers: corsHeaders });
+  } catch (e) {
+    return Response.json({ error: e.message || "Internal error" }, { status: 500, headers: corsHeaders });
+  }
+}
 
 // ── OAuth1 HMAC-SHA1 signing ─────────────────────────────────────────────
 

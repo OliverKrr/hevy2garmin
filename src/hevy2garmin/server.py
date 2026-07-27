@@ -8,7 +8,9 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from html import escape
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +20,22 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
 from jinja2 import Environment, FileSystemLoader
 
-from hevy2garmin import db, __version__
+from hevy2garmin import db, login_ratelimit, __version__
 from hevy2garmin.db_interface import NoWritableDatabaseError
-from hevy2garmin.auth import auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE
+from hevy2garmin.auth import (
+    auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE, session_ttl,
+)
 from hevy2garmin.config import is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
-from hevy2garmin.sync import sync
+from hevy2garmin.sync import (
+    sync,
+    sync_routines,
+    sync_routine,
+    routine_schedule_dates,
+    schedule_routine,
+    unschedule_routine_entry,
+)
 from hevy2garmin import garmin_login
 
 logger = logging.getLogger("hevy2garmin")
@@ -55,6 +66,23 @@ _jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape
 # template so client-side fetch() URLs — which no proxy can rewrite — resolve
 # under the prefix instead of escaping to the origin root.
 _url_prefix: contextvars.ContextVar[str] = contextvars.ContextVar("url_prefix", default="")
+
+
+# Weekday / short-date helpers for the routines "Upcoming schedule" timeline.
+_SCHED_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_SCHED_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _sched_parts(iso: Any) -> dict[str, str]:
+    """Format an ISO date (YYYY-MM-DD) into {'short': 'Jul 24', 'weekday': 'Friday'}."""
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+        return {"short": f"{_SCHED_MONTHS[d.month - 1]} {d.day}", "weekday": _SCHED_WEEKDAYS[d.weekday()]}
+    except (ValueError, TypeError):
+        return {"short": str(iso or ""), "weekday": ""}
+
+
+_jinja_env.globals["sched_parts"] = _sched_parts
 
 
 def _render(template_name: str, **ctx) -> HTMLResponse:
@@ -334,6 +362,53 @@ async def _startup_autosync() -> None:
         _schedule_autosync(interval)
 
 
+def client_ip(request: Request) -> str:
+    """Best-effort real client IP.
+
+    Behind Vercel/Cloudflare the edge populates ``X-Forwarded-For`` and the
+    leftmost entry is the original client (proxies append their hops on the
+    right). Falls back to ``X-Real-IP``, then the socket peer, and finally the
+    literal ``"unknown"`` bucket for header-less clients (so a missing header
+    can't create unbounded rate-limit buckets).
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    xrip = request.headers.get("x-real-ip")
+    if xrip:
+        return xrip.strip()
+    return request.client.host if request.client else "unknown"
+
+
+def is_https(request: Request) -> bool:
+    """True when the original request was HTTPS.
+
+    On Vercel, TLS terminates at the edge and the app sees ``http`` plus an
+    ``X-Forwarded-Proto: https`` header, so we check both.
+    """
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+
+
+_epoch_cache = 0
+
+
+def _session_epoch() -> int:
+    """Current 'sign out everywhere' epoch from app_config.
+
+    Best-effort: on a DB error, return the last value we successfully read
+    (default 0) so a transient outage never spuriously invalidates sessions.
+    """
+    global _epoch_cache
+    try:
+        v = db.get_db().get_app_config("session_epoch")
+        _epoch_cache = int(v.get("n", 0)) if isinstance(v, dict) else 0
+    except Exception:
+        return _epoch_cache
+    return _epoch_cache
+
+
 _is_configured_cache: bool | None = None
 
 @app.middleware("http")
@@ -352,11 +427,11 @@ async def check_setup(request: Request, call_next):
         return await call_next(request)
 
     # ── Dashboard auth gate ──────────────────────────────────────────────
-    # When H2G_PASSWORD is set, all routes except /login and /api/cron/*
+    # When a password is set, all routes except /login and /api/cron/*
     # require a valid session cookie. Without it, redirect to /login.
     if auth_enabled() and path not in ("/login",) and not path.startswith("/api/cron/"):
         session_cookie = request.cookies.get(SESSION_COOKIE)
-        if not verify_session(session_cookie):
+        if not verify_session(session_cookie, _session_epoch()):
             if path.startswith("/api/"):
                 from starlette.responses import Response
                 return Response("Unauthorized", status_code=401)
@@ -388,8 +463,33 @@ async def check_setup(request: Request, call_next):
     # Auto-set auth cookie on every GET so it survives cookie clears and new devices.
     # SameSite=strict prevents cross-origin POSTs from using it (CSRF protection).
     if secret and request.method == "GET" and not request.cookies.get("h2g_auth"):
-        response.set_cookie("h2g_auth", secret, httponly=True, samesite="strict", max_age=365 * 86400)
+        response.set_cookie("h2g_auth", secret, httponly=True, samesite="strict",
+                            secure=is_https(request), max_age=365 * 86400)
 
+    return response
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Defense-in-depth response headers. Registered after check_setup so it is
+    the outermost middleware and stamps every response — including redirects and
+    the lock/DB pages."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    # Pragmatic CSP: only the high-value, no-cost directives. A strict
+    # script/style policy is deferred because the templates use inline JS and
+    # load scripts from CDNs (would need 'unsafe-inline').
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "frame-ancestors 'none'; form-action 'self'; base-uri 'self'",
+    )
+    if is_https(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return response
 
 
@@ -398,7 +498,7 @@ async def check_setup(request: Request, call_next):
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     """Show login form. Redirects to dashboard if already authenticated or auth disabled."""
-    if not auth_enabled() or verify_session(request.cookies.get(SESSION_COOKIE)):
+    if not auth_enabled() or verify_session(request.cookies.get(SESSION_COOKIE), _session_epoch()):
         return RedirectResponse("/")
     error = request.query_params.get("error")
     return HTMLResponse(
@@ -408,22 +508,46 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login_submit(request: Request, password: str = Form(...)):
-    """Verify password, set session cookie, redirect to dashboard."""
+    """Verify password (rate-limited), set session cookie, redirect to dashboard."""
     next_url = request.query_params.get("next", "/")
     # Prevent open redirect: only allow relative paths
     if not next_url.startswith("/") or next_url.startswith("//"):
         next_url = "/"
-    if not check_password(password):
+
+    key = client_ip(request)
+    try:
+        store = db.get_db()
+    except Exception:
+        store = None  # DB unavailable → skip the limiter (never lock the admin out on an outage)
+
+    def _error(msg: str, status: int) -> HTMLResponse:
         return HTMLResponse(
             _jinja_env.get_template("login.html").render(
-                error="Wrong password.", url_prefix=_url_prefix.get()
+                error=msg, url_prefix=_url_prefix.get()
             ),
-            status_code=401,
+            status_code=status,
         )
+
+    # Rate limit: check the lockout BEFORE comparing credentials.
+    remaining = login_ratelimit.lockout_remaining(store, key) if store else 0
+    if remaining > 0:
+        return _error(f"Too many attempts. Try again in {format_cooldown(remaining)}.", 429)
+
+    if not check_password(password):
+        remaining = 0
+        if store:
+            login_ratelimit.record_failure(store, key)
+            remaining = login_ratelimit.lockout_remaining(store, key)
+        if remaining > 0:
+            return _error(f"Too many attempts. Try again in {format_cooldown(remaining)}.", 429)
+        return _error("Wrong password.", 401)
+
+    if store:
+        login_ratelimit.clear_failures(store, key)
     response = RedirectResponse(next_url, status_code=303)
     response.set_cookie(
-        SESSION_COOKIE, sign_session(),
-        httponly=True, samesite="strict", max_age=30 * 24 * 3600,
+        SESSION_COOKIE, sign_session(_session_epoch()),
+        httponly=True, samesite="strict", secure=is_https(request), max_age=session_ttl(),
     )
     return response
 
@@ -431,6 +555,28 @@ async def login_submit(request: Request, password: str = Form(...)):
 @app.post("/logout")
 async def logout():
     """Clear session cookie and redirect to login."""
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+@app.post("/logout-all")
+async def logout_all():
+    """Sign out everywhere: bump the server-side epoch so every outstanding
+    session cookie (on all devices) stops validating."""
+    global _epoch_cache
+    try:
+        store = db.get_db()
+        cur = store.get_app_config("session_epoch")
+        n = int(cur.get("n", 0)) if isinstance(cur, dict) else 0
+        store.set_app_config("session_epoch", {"n": n + 1})
+        _epoch_cache = n + 1
+    except Exception:
+        # Don't pretend success: the epoch never advanced, so other devices are
+        # still signed in. Keep this session and surface the error so the admin
+        # can retry, instead of redirecting to /login as if it worked.
+        logger.warning("could not bump session epoch for /logout-all", exc_info=True)
+        return RedirectResponse("/settings?err=logout_all", status_code=303)
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE)
     return response
@@ -495,8 +641,25 @@ async def dashboard(request: Request):
     except Exception:
         pass
 
+    # Routine summary — all DB-backed (no Hevy call). "pending" needs the total
+    # routine count, cached by the /routines page and by routine sync.
+    routine_stats = {"synced": 0, "scheduled": 0}
+    recent_routines: list = []
+    routines_pending = None
+    try:
+        routine_stats = db.get_routine_stats()
+        recent_routines = db.get_recent_synced_routines(5)
+        cached_total = db.get_app_config("routines_total")
+        if isinstance(cached_total, dict) and isinstance(cached_total.get("count"), int):
+            routines_pending = max(0, cached_total["count"] - routine_stats["synced"])
+    except Exception:
+        logger.warning("Could not build routine summary for dashboard", exc_info=True)
+
     return _render(
         "dashboard.html",
+        routine_stats=routine_stats,
+        recent_routines=recent_routines,
+        routines_pending=routines_pending,
         synced_count=synced_count,
         matched_count=matched_count,
         terminal_count=terminal_count,
@@ -536,6 +699,7 @@ async def setup_page(request: Request):
 
 @app.post("/setup")
 async def setup_save(
+    request: Request,
     hevy_api_key: str = Form(""),
     garmin_email: str = Form(""),
     garmin_password: str = Form(""),
@@ -671,7 +835,8 @@ async def setup_save(
     # Set auth cookie if HEVY2GARMIN_SECRET is configured (cloud deployments)
     secret = os.environ.get("HEVY2GARMIN_SECRET")
     if secret:
-        response.set_cookie("h2g_auth", secret, httponly=True, samesite="strict", max_age=365 * 86400)
+        response.set_cookie("h2g_auth", secret, httponly=True, samesite="strict",
+                            secure=is_https(request), max_age=365 * 86400)
     return response
 
 
@@ -1032,7 +1197,7 @@ async def settings_page(request: Request):
     merge_extra_types = ", ".join(
         t for t in config.get("merge_activity_types", ["strength_training"]) if t != "strength_training"
     )
-    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types)
+    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types, err=request.query_params.get("err"))
 
 
 @app.post("/settings")
@@ -1344,6 +1509,249 @@ async def api_sync(request: Request):
     _last_sync_time = datetime.now(timezone.utc)
     _record_sync_log(result, trigger=f"manual ({scope})")
     return _render("partials/sync_result.html", result=result)
+
+
+_SCHEDULES_PAGE_SIZES = (10, 25, 100)
+_SCHEDULES_PAGE_SIZE = _SCHEDULES_PAGE_SIZES[0]
+
+
+def _schedules_context(
+    page: int, start_date: str | None = None, title: str | None = None, page_size: int | None = None
+) -> dict:
+    """Build the paginated 'scheduled workouts' context (local DB only).
+
+    ``start_date`` (default today) filters to entries on/after that date; ``title``
+    filters by routine name (case-insensitive substring); ``page_size`` (one of
+    ``_SCHEDULES_PAGE_SIZES``, default 10) sets rows per page. All are echoed back so
+    the filter form, selector and the pagination/refresh URLs keep the current state.
+    """
+    _db = db.get_db()
+    start = start_date or date.today().isoformat()
+    try:
+        date.fromisoformat(start)  # guard the query and the value echoed into the form
+    except (ValueError, TypeError):
+        start = date.today().isoformat()
+    title = (title or "").strip()
+    size = page_size if page_size in _SCHEDULES_PAGE_SIZES else _SCHEDULES_PAGE_SIZE
+    total = _db.count_upcoming_routine_schedules(start, title or None)
+    total_pages = max(1, ceil(total / size))
+    page = max(1, min(page, total_pages))
+    rows = _db.get_upcoming_routine_schedules(
+        start, size, (page - 1) * size, title or None
+    )
+    return {
+        "scheduled_workouts": rows,
+        "page": page,
+        "total_pages": total_pages,
+        "sched_total": total,
+        "start_date": start,
+        "title_query": title,
+        "page_size": size,
+        "page_sizes": _SCHEDULES_PAGE_SIZES,
+    }
+
+
+@app.get("/routines", response_class=HTMLResponse)
+async def routines_page(request: Request):
+    """List Hevy routines and their sync status."""
+    config = load_config()
+    routines: list[dict] = []
+    fetch_error = None
+    # Local-DB data — load it outside the Hevy fetch so the schedules table still
+    # renders even when Hevy is unreachable.
+    try:
+        schedules = _schedules_context(1)
+    except Exception:
+        logger.exception("Failed to load scheduled workouts")
+        schedules = {"scheduled_workouts": [], "page": 1, "total_pages": 1, "sched_total": 0}
+    try:
+        from hevy2garmin.hevy import HevyClient
+        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total
+
+        _db = db.get_db()
+        hevy = HevyClient(api_key=config.get("hevy_api_key"))
+        all_routines = fetch_all_routines(hevy)
+        _cache_routines_total(_db, len(all_routines))
+        for r in all_routines:
+            record = _db.get_synced_routine(r.get("id", ""))
+            exercises = [
+                {
+                    "name": ex.get("title") or ex.get("name") or "Exercise",
+                    "sets": len(ex.get("sets") or []),
+                }
+                for ex in (r.get("exercises") or [])
+            ]
+            routines.append({
+                "id": r.get("id", ""),
+                "title": r.get("title") or r.get("name") or "Routine",
+                "exercises": exercises,
+                "exercise_count": len(exercises),
+                "synced": record is not None,
+                "scheduled_date": (record or {}).get("scheduled_date"),
+            })
+    except Exception:
+        logger.exception("Failed to load Hevy routines")
+        fetch_error = "Could not load routines from Hevy. Check your API key and try again."
+
+    total = len(routines)
+    synced = sum(1 for r in routines if r["synced"])
+    stats = {
+        "total": total,
+        "synced": synced,
+        "pending": max(0, total - synced),
+        "scheduled": sum(1 for r in routines if r["scheduled_date"]),
+        "pct": round(synced / total * 100) if total else 0,
+    }
+    return _render(
+        "routines.html", request=request, routines=routines, stats=stats,
+        fetch_error=fetch_error, **schedules
+    )
+
+
+@app.get("/api/routines/schedules", response_class=HTMLResponse)
+async def api_routines_schedules(
+    request: Request, page: int = 1, start: str | None = None, q: str | None = None,
+    size: int = _SCHEDULES_PAGE_SIZE,
+):
+    """Return the paginated 'scheduled workouts' table fragment (HTMX navigation/filter)."""
+    try:
+        ctx = _schedules_context(page, start, q, size)
+    except Exception:
+        logger.exception("Failed to load scheduled workouts")
+        return HTMLResponse('<div class="toast toast-error">Could not load scheduled workouts.</div>')
+    return _render("routine_schedules.html", **ctx)
+
+
+@app.post("/api/routines/sync", response_class=HTMLResponse)
+async def api_routines_sync(request: Request):
+    """Create Garmin planned workouts from all Hevy routines."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
+
+    form = await request.form()
+    force = form.get("force") in ("1", "true", "on")
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = sync_routines(dry_run=False, force=force)
+    except Exception:
+        logger.exception("Routine sync failed")
+        return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    msg = (
+        f"{result['created']} created, {result['updated']} updated, "
+        f"{result['skipped']} skipped, {result['failed']} failed"
+        + (f", {result['scheduled']} scheduled" if result.get("scheduled") else "")
+    )
+    cls = "toast-error" if result["failed"] else "toast-success"
+    # Sync's restore path can (re)schedule routines, so refresh the schedules table too.
+    return HTMLResponse(
+        f'<div class="toast {cls}">Routine sync complete: {msg}</div>',
+        headers={"HX-Trigger": "refreshSchedules"},
+    )
+
+
+@app.post("/api/routines/{hevy_routine_id}/sync", response_class=HTMLResponse)
+async def api_routine_sync_one(request: Request, hevy_routine_id: str):
+    """Sync a single Hevy routine and swap its table row in place."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
+
+    form = await request.form()
+    force = form.get("force") in ("1", "true", "on")
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = sync_routine(hevy_routine_id, force=force)
+    except Exception:
+        logger.exception("Routine %s sync failed", hevy_routine_id)
+        return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    outcome = result["outcome"]
+    # The routine title is user-controlled (Hevy account data), so escape it before
+    # interpolating into the toast HTML — these f-strings bypass Jinja's autoescape.
+    title = escape(result["row"]["title"])
+    if outcome == "failed":
+        return HTMLResponse(f'<div class="toast toast-error">Could not sync "{title}". Check the logs.</div>')
+    # Toast into #routines-result plus an out-of-band swap of the updated row, so it flips
+    # to "synced" (and gains the Schedule form) without a full page reload. HX-Trigger
+    # refreshes the schedules table since the restore path may have re-booked dates.
+    row_html = _render("routine_row.html", r=result["row"], oob=True).body.decode()
+    toast = f'<div class="toast toast-success">Synced "{title}" ({outcome}).</div>'
+    return HTMLResponse(toast + row_html, headers={"HX-Trigger": "refreshSchedules"})
+
+
+@app.post("/api/routines/{hevy_routine_id}/schedule", response_class=HTMLResponse)
+async def api_routine_schedule(request: Request, hevy_routine_id: str):
+    """Schedule one synced routine on the Garmin calendar (once or recurring weekly)."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Scheduling disabled in demo mode.</div>')
+
+    form = await request.form()
+    mode = form.get("mode", "once")
+    try:
+        dates = routine_schedule_dates(
+            mode,
+            date=form.get("date"),
+            weekday=form.get("weekday"),
+            start_date=form.get("start_date"),
+            weeks=form.get("weeks"),
+        )
+    except (ValueError, TypeError) as e:
+        return HTMLResponse(f'<div class="toast toast-error">Invalid schedule: {e}</div>')
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        result = schedule_routine(hevy_routine_id, dates)
+    except ValueError as e:
+        return HTMLResponse(f'<div class="toast toast-error">{e}</div>')
+    except Exception:
+        logger.exception("Scheduling routine %s failed", hevy_routine_id)
+        return HTMLResponse('<div class="toast toast-error">Scheduling failed. Check the logs for details.</div>')
+    finally:
+        _sync_executing.release()
+
+    n = result["scheduled"]
+    span = f" ({result['dates'][0]} → {result['dates'][-1]})" if n > 1 else f" on {result['dates'][0]}"
+    # HX-Trigger fires a client event so the "Scheduled workouts" table refreshes itself.
+    return HTMLResponse(
+        f'<div class="toast toast-success">Scheduled {n} session(s){span}.</div>',
+        headers={"HX-Trigger": "refreshSchedules"},
+    )
+
+
+@app.post("/api/routines/{hevy_routine_id}/schedule/{schedule_id}/unschedule", response_class=HTMLResponse)
+async def api_routine_unschedule(
+    request: Request, hevy_routine_id: str, schedule_id: str,
+    page: int = 1, start: str | None = None, q: str | None = None,
+    size: int = _SCHEDULES_PAGE_SIZE,
+):
+    """Remove one scheduled calendar entry, then re-render the schedules table."""
+    if is_demo_mode():
+        return HTMLResponse('<div class="toast toast-success">Unscheduling disabled in demo mode.</div>')
+
+    if not _acquire_sync_lock():
+        return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
+
+    try:
+        unschedule_routine_entry(hevy_routine_id, schedule_id)
+    except Exception:
+        logger.exception("Unscheduling routine %s entry %s failed", hevy_routine_id, schedule_id)
+        return HTMLResponse('<div class="toast toast-error">Could not remove the scheduled workout. Check the logs.</div>')
+    finally:
+        _sync_executing.release()
+
+    return _render("routine_schedules.html", **_schedules_context(page, start, q, size))
 
 
 @app.post("/api/sync/{workout_id}", response_class=HTMLResponse)

@@ -132,3 +132,83 @@ class Database(ABC):
     @abstractmethod
     def get_terminal_counts(self) -> dict[str, int]:
         """Return uploaded, manual, skipped, and total terminal counts."""
+
+    # ── Routine → Garmin planned-workout tracking ───────────────────────────
+    @abstractmethod
+    def get_synced_routine(self, hevy_routine_id: str) -> dict | None:
+        """Return the sync record for a Hevy routine, or None if never synced."""
+
+    @abstractmethod
+    def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
+        """True if the routine was synced and (if given) not edited on Hevy since."""
+
+    @abstractmethod
+    def mark_routine_synced(
+        self,
+        hevy_routine_id: str,
+        garmin_workout_id: str | None = None,
+        title: str = "",
+        hevy_updated_at: str | None = None,
+        scheduled_date: str | None = None,
+        content_hash: str | None = None,
+        status: str = "success",
+    ) -> None:
+        """Record a routine synced to a Garmin planned workout.
+
+        ``status="schedule_pending"`` marks a workout that was created on Garmin
+        but whose calendar scheduling hasn't been confirmed yet, so the next sync
+        retries it instead of skipping the routine as already done.
+        """
+
+    @abstractmethod
+    def delete_synced_routine(self, hevy_routine_id: str) -> bool:
+        """Remove a routine sync record (and its calendar entries). True if deleted."""
+
+    @abstractmethod
+    def add_routine_schedule(
+        self, hevy_routine_id: str, schedule_id: str, scheduled_date: str | None = None
+    ) -> None:
+        """Record a Garmin calendar entry (``workoutScheduleId``) for a routine."""
+
+    @abstractmethod
+    def get_routine_schedule_ids(self, hevy_routine_id: str) -> list[str]:
+        """Return the Garmin calendar entry ids currently booked for a routine."""
+
+    @abstractmethod
+    def get_routine_scheduled_dates(self, hevy_routine_id: str) -> list[str]:
+        """Return the distinct dates (ISO) a routine currently has booked, ascending."""
+
+    @abstractmethod
+    def clear_routine_schedules(self, hevy_routine_id: str) -> None:
+        """Drop all tracked calendar entries for a routine (after unscheduling them)."""
+
+    @abstractmethod
+    def delete_routine_schedule(self, hevy_routine_id: str, schedule_id: str) -> bool:
+        """Drop one tracked calendar entry. Returns True if a row was removed."""
+
+    @abstractmethod
+    def get_upcoming_routine_schedules(
+        self, on_or_after: str, limit: int, offset: int, title_query: str | None = None
+    ) -> list[dict]:
+        """Return scheduled calendar entries on/after ``on_or_after`` (ISO date), with
+        the routine title, ordered by date. Paginated via ``limit``/``offset``.
+
+        ``title_query`` (optional) filters to routines whose title contains it
+        (case-insensitive substring). Each dict has ``hevy_routine_id``,
+        ``schedule_id``, ``scheduled_date``, ``title``.
+        """
+
+    @abstractmethod
+    def count_upcoming_routine_schedules(
+        self, on_or_after: str, title_query: str | None = None
+    ) -> int:
+        """Count scheduled entries on/after ``on_or_after`` (optionally filtered by
+        ``title_query``), for pagination."""
+
+    @abstractmethod
+    def get_routine_stats(self) -> dict:
+        """Return routine sync counts: ``{"synced": int, "scheduled": int}``."""
+
+    @abstractmethod
+    def get_recent_synced_routines(self, limit: int = 5) -> list[dict]:
+        """Return recently synced routines, newest first."""

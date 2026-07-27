@@ -38,9 +38,151 @@ def _make_db(tmp_path):
                 cur.execute("DELETE FROM synced_workouts")
                 cur.execute("DELETE FROM sync_log")
                 cur.execute("DELETE FROM hr_cache")
+                cur.execute("DELETE FROM synced_routines")
+                cur.execute("DELETE FROM routine_schedules")
             conn.commit()
         return db
     return SQLiteDatabase(tmp_path / "test.db")
+
+
+class TestRoutineTracking:
+    def test_not_synced_initially(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.is_routine_synced("r-unknown") is False
+        assert db.get_synced_routine("r-unknown") is None
+
+    def test_mark_then_check(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w9", title="Push",
+                               hevy_updated_at="2026-01-01T00:00:00Z")
+        assert db.is_routine_synced("r1") is True
+        record = db.get_synced_routine("r1")
+        assert record["garmin_workout_id"] == "w9"
+        assert record["title"] == "Push"
+
+    def test_stale_when_edited_since(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", hevy_updated_at="2026-01-01T00:00:00Z")
+        # Edited later on Hevy → treated as not synced (will be recreated).
+        assert db.is_routine_synced("r1", "2026-02-01T00:00:00Z") is False
+        # Unchanged timestamp → still synced.
+        assert db.is_routine_synced("r1", "2026-01-01T00:00:00Z") is True
+
+    def test_upsert_updates_record(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Old")
+        db.mark_routine_synced("r1", garmin_workout_id="w2", title="New")
+        assert db.get_synced_routine("r1")["garmin_workout_id"] == "w2"
+
+    def test_delete(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1")
+        assert db.delete_synced_routine("r1") is True
+        assert db.is_routine_synced("r1") is False
+        assert db.delete_synced_routine("r1") is False
+
+    def test_routine_schedule_round_trip(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.add_routine_schedule("r1", "111", "2026-07-20")
+        db.add_routine_schedule("r1", "222", "2026-07-27")
+        assert set(db.get_routine_schedule_ids("r1")) == {"111", "222"}
+        # Re-adding the same id is a no-op (idempotent), not a duplicate/error.
+        db.add_routine_schedule("r1", "111", "2026-07-20")
+        assert set(db.get_routine_schedule_ids("r1")) == {"111", "222"}
+        db.clear_routine_schedules("r1")
+        assert db.get_routine_schedule_ids("r1") == []
+
+    def test_delete_synced_routine_clears_schedules(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1")
+        db.add_routine_schedule("r1", "111", "2026-07-20")
+        assert db.delete_synced_routine("r1") is True
+        # Removing the routine also drops its tracked calendar entries.
+        assert db.get_routine_schedule_ids("r1") == []
+
+    def test_upcoming_schedules_filters_orders_and_paginates(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Push")
+        db.mark_routine_synced("r2", garmin_workout_id="w2", title="Pull")
+        db.add_routine_schedule("r1", "s-past", "2026-06-01")   # past → excluded
+        db.add_routine_schedule("r1", "s-b", "2026-07-27")
+        db.add_routine_schedule("r2", "s-a", "2026-07-20")
+        today = "2026-07-15"
+        # Only future entries are counted, and the title comes from the join.
+        assert db.count_upcoming_routine_schedules(today) == 2
+        page1 = db.get_upcoming_routine_schedules(today, 1, 0)
+        assert [(r["scheduled_date"], r["title"]) for r in page1] == [("2026-07-20", "Pull")]
+        page2 = db.get_upcoming_routine_schedules(today, 1, 1)
+        assert [(r["scheduled_date"], r["title"]) for r in page2] == [("2026-07-27", "Push")]
+        assert page2[0]["schedule_id"] == "s-b" and page2[0]["hevy_routine_id"] == "r1"
+
+    def test_upcoming_schedules_title_filter(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Push Day")
+        db.mark_routine_synced("r2", garmin_workout_id="w2", title="Leg Day")
+        db.add_routine_schedule("r1", "s1", "2999-01-05")
+        db.add_routine_schedule("r2", "s2", "2999-01-06")
+        today = "2026-07-15"
+        # Case-insensitive substring match on the routine title.
+        assert db.count_upcoming_routine_schedules(today, "push") == 1
+        rows = db.get_upcoming_routine_schedules(today, 10, 0, "PUSH")
+        assert [r["title"] for r in rows] == ["Push Day"]
+        # A non-matching query returns nothing; no query returns everything.
+        assert db.count_upcoming_routine_schedules(today, "cardio") == 0
+        assert db.count_upcoming_routine_schedules(today) == 2
+
+    def test_get_routine_scheduled_dates(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.add_routine_schedule("r1", "s2", "2026-08-10")
+        db.add_routine_schedule("r1", "s1", "2026-08-03")
+        db.add_routine_schedule("r1", "s3", "2026-08-03")  # duplicate date
+        db.add_routine_schedule("r2", "s9", "2026-09-01")  # other routine
+        # Distinct dates for the routine, ascending.
+        assert db.get_routine_scheduled_dates("r1") == ["2026-08-03", "2026-08-10"]
+        assert db.get_routine_scheduled_dates("r2") == ["2026-09-01"]
+        assert db.get_routine_scheduled_dates("nope") == []
+
+    def test_delete_routine_schedule_one_entry(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.add_routine_schedule("r1", "111", "2026-07-20")
+        db.add_routine_schedule("r1", "222", "2026-07-27")
+        assert db.delete_routine_schedule("r1", "111") is True
+        assert db.get_routine_schedule_ids("r1") == ["222"]
+        # Deleting a non-existent entry reports no removal.
+        assert db.delete_routine_schedule("r1", "999") is False
+
+    def test_content_hash_round_trip(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="abc123")
+        assert db.get_synced_routine("r1")["content_hash"] == "abc123"
+        # Upsert updates the hash.
+        db.mark_routine_synced("r1", garmin_workout_id="w1", content_hash="def456")
+        assert db.get_synced_routine("r1")["content_hash"] == "def456"
+
+    def test_routine_stats_empty(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.get_routine_stats() == {"synced": 0, "scheduled": 0}
+
+    def test_routine_stats_counts_synced_and_scheduled(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        db.mark_routine_synced("r1", garmin_workout_id="w1", title="Push")
+        db.mark_routine_synced("r2", garmin_workout_id="w2", title="Pull", scheduled_date="2026-07-20")
+        db.mark_routine_synced("r3", garmin_workout_id="w3", title="Legs", scheduled_date="2026-07-21")
+        assert db.get_routine_stats() == {"synced": 3, "scheduled": 2}
+
+    def test_recent_synced_routines_fields_and_limit(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        for i in range(7):
+            db.mark_routine_synced(f"r{i}", garmin_workout_id=f"w{i}", title=f"Routine {i}")
+        recent = db.get_recent_synced_routines(5)
+        assert len(recent) == 5
+        sample = recent[0]
+        assert set(sample) >= {"hevy_routine_id", "title", "scheduled_date",
+                               "garmin_workout_id", "synced_at"}
+
+    def test_recent_synced_routines_empty(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path)
+        assert db.get_recent_synced_routines(5) == []
 
 
 class TestSyncTracking:

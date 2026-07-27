@@ -122,6 +122,31 @@ class SQLiteDatabase(Database):
                 updated_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS synced_routines (
+                hevy_routine_id TEXT PRIMARY KEY,
+                garmin_workout_id TEXT,
+                title TEXT,
+                hevy_updated_at TEXT,
+                scheduled_date TEXT,
+                content_hash TEXT,
+                synced_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'success'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS routine_schedules (
+                hevy_routine_id TEXT NOT NULL,
+                schedule_id TEXT NOT NULL,
+                scheduled_date TEXT,
+                PRIMARY KEY (hevy_routine_id, schedule_id)
+            )
+        """)
+        # Migration: add content_hash to routine tables created before it existed.
+        try:
+            conn.execute("ALTER TABLE synced_routines ADD COLUMN content_hash TEXT")
+        except Exception:
+            pass  # Column already exists
         conn.commit()
         return conn
 
@@ -141,6 +166,182 @@ class SQLiteDatabase(Database):
         ).fetchone()
         conn.close()
         return row[0] if row else None
+
+    # ── Routine → Garmin planned-workout tracking ───────────────────────────
+    def get_synced_routine(self, hevy_routine_id: str) -> dict | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT hevy_routine_id, garmin_workout_id, title, hevy_updated_at, "
+            "scheduled_date, content_hash, synced_at, status FROM synced_routines "
+            "WHERE hevy_routine_id = ?",
+            (hevy_routine_id,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        keys = ("hevy_routine_id", "garmin_workout_id", "title", "hevy_updated_at",
+                "scheduled_date", "content_hash", "synced_at", "status")
+        return dict(zip(keys, row))
+
+    def is_routine_synced(self, hevy_routine_id: str, hevy_updated_at: str | None = None) -> bool:
+        record = self.get_synced_routine(hevy_routine_id)
+        if record is None:
+            return False
+        if hevy_updated_at and record.get("hevy_updated_at"):
+            # Edited on Hevy since last sync → treat as not synced (re-create).
+            return not _ts_newer(hevy_updated_at, record["hevy_updated_at"])
+        return True
+
+    def mark_routine_synced(
+        self,
+        hevy_routine_id: str,
+        garmin_workout_id: str | None = None,
+        title: str = "",
+        hevy_updated_at: str | None = None,
+        scheduled_date: str | None = None,
+        content_hash: str | None = None,
+        status: str = "success",
+    ) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO synced_routines
+                (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(hevy_routine_id) DO UPDATE SET
+                garmin_workout_id = excluded.garmin_workout_id,
+                title = excluded.title,
+                hevy_updated_at = excluded.hevy_updated_at,
+                scheduled_date = excluded.scheduled_date,
+                content_hash = excluded.content_hash,
+                synced_at = datetime('now'),
+                status = excluded.status
+            """,
+            (hevy_routine_id, garmin_workout_id, title, hevy_updated_at, scheduled_date, content_hash, status),
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_synced_routine(self, hevy_routine_id: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM synced_routines WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
+        deleted = cur.rowcount > 0
+        conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
+        conn.commit()
+        conn.close()
+        return deleted
+
+    def add_routine_schedule(
+        self, hevy_routine_id: str, schedule_id: str, scheduled_date: str | None = None
+    ) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO routine_schedules (hevy_routine_id, schedule_id, scheduled_date) "
+            "VALUES (?, ?, ?) ON CONFLICT(hevy_routine_id, schedule_id) DO NOTHING",
+            (hevy_routine_id, str(schedule_id), scheduled_date),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_routine_schedule_ids(self, hevy_routine_id: str) -> list[str]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT schedule_id FROM routine_schedules WHERE hevy_routine_id = ?",
+            (hevy_routine_id,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def get_routine_scheduled_dates(self, hevy_routine_id: str) -> list[str]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT scheduled_date FROM routine_schedules "
+            "WHERE hevy_routine_id = ? AND scheduled_date IS NOT NULL "
+            "ORDER BY scheduled_date ASC",
+            (hevy_routine_id,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def clear_routine_schedules(self, hevy_routine_id: str) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_routine_schedule(self, hevy_routine_id: str, schedule_id: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ? AND schedule_id = ?",
+            (hevy_routine_id, str(schedule_id)),
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+    @staticmethod
+    def _upcoming_from_where(on_or_after: str, title_query: str | None) -> tuple[str, list]:
+        """Shared FROM/JOIN/WHERE for the upcoming-schedules get + count queries."""
+        sql = (
+            "FROM routine_schedules rs "
+            "LEFT JOIN synced_routines sr ON rs.hevy_routine_id = sr.hevy_routine_id "
+            "WHERE rs.scheduled_date >= ?"
+        )
+        params: list = [on_or_after]
+        if title_query:
+            sql += " AND LOWER(sr.title) LIKE '%' || LOWER(?) || '%'"
+            params.append(title_query)
+        return sql, params
+
+    def get_upcoming_routine_schedules(
+        self, on_or_after: str, limit: int, offset: int, title_query: str | None = None
+    ) -> list[dict]:
+        from_where, params = self._upcoming_from_where(on_or_after, title_query)
+        sql = (
+            "SELECT rs.hevy_routine_id, rs.schedule_id, rs.scheduled_date, sr.title "
+            + from_where
+            + " ORDER BY rs.scheduled_date ASC, sr.title ASC LIMIT ? OFFSET ?"
+        )
+        conn = self._get_conn()
+        rows = conn.execute(sql, params + [limit, offset]).fetchall()
+        conn.close()
+        keys = ("hevy_routine_id", "schedule_id", "scheduled_date", "title")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def count_upcoming_routine_schedules(
+        self, on_or_after: str, title_query: str | None = None
+    ) -> int:
+        from_where, params = self._upcoming_from_where(on_or_after, title_query)
+        conn = self._get_conn()
+        row = conn.execute("SELECT COUNT(*) " + from_where, params).fetchone()
+        conn.close()
+        return row[0] or 0
+
+    def get_routine_stats(self) -> dict:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*), COUNT(scheduled_date) FROM synced_routines"
+        ).fetchone()
+        conn.close()
+        return {"synced": row[0] or 0, "scheduled": row[1] or 0}
+
+    def get_recent_synced_routines(self, limit: int = 5) -> list[dict]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT hevy_routine_id, title, scheduled_date, garmin_workout_id, synced_at "
+            "FROM synced_routines ORDER BY synced_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        keys = ("hevy_routine_id", "title", "scheduled_date", "garmin_workout_id", "synced_at")
+        return [dict(zip(keys, r)) for r in rows]
 
     def mark_synced(
         self,

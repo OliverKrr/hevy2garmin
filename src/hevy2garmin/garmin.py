@@ -414,6 +414,81 @@ def push_exercise_sets(client: Garmin, activity_id: int, payload: dict) -> None:
     logger.info("  Pushed %d exercise sets to activity %s", len(payload.get("exerciseSets", [])), activity_id)
 
 
+def create_workout(client: Garmin, payload: dict) -> int | None:
+    """Create a planned workout in the Garmin Connect Workouts library.
+
+    POSTs to the undocumented /workout-service/workout endpoint — the same one
+    the Garmin Connect web UI uses to save a workout. Unlike upload_fit(), this
+    creates a *plan* (a reusable template shown under Training > Workouts), not a
+    completed activity. Returns the new workoutId, or None if absent.
+
+    Called directly (not through _limiter) so the JSON response body — which
+    carries the workoutId — is returned verbatim; the limiter is tuned for the
+    activity endpoints' 204s.
+    """
+    time.sleep(1.0)  # manual rate limit
+    resp = client.client.request(
+        "POST", "connectapi", "/workout-service/workout", json=payload
+    )
+    data = resp.json() if hasattr(resp, "json") else resp
+    workout_id = data.get("workoutId") if isinstance(data, dict) else None
+    logger.info("  Created Garmin workout %s ('%s')", workout_id, payload.get("workoutName"))
+    return workout_id
+
+
+def list_workouts(client: Garmin, limit: int = 100) -> list[dict]:
+    """List the user's saved Garmin workouts (for idempotency / reconciliation)."""
+    time.sleep(1.0)  # manual rate limit
+    resp = client.client.request(
+        "GET",
+        "connectapi",
+        f"/workout-service/workouts?start=1&limit={limit}&myWorkoutsOnly=true",
+    )
+    data = resp.json() if hasattr(resp, "json") else resp
+    return data if isinstance(data, list) else []
+
+
+def delete_workout(client: Garmin, workout_id: int | str) -> None:
+    """Delete a saved Garmin workout (used to recreate one after a routine edit)."""
+    time.sleep(1.0)  # manual rate limit
+    client.client.request(
+        "DELETE", "connectapi", f"/workout-service/workout/{workout_id}"
+    )
+    logger.info("  Deleted Garmin workout %s", workout_id)
+
+
+def schedule_workout(client: Garmin, workout_id: int | str, date: str) -> int | None:
+    """Schedule a saved Garmin workout onto the calendar for ``date`` (YYYY-MM-DD).
+
+    Returns the ``workoutScheduleId`` Garmin assigns to the new calendar entry so
+    the caller can track and later unschedule it (Garmin appends a fresh entry on
+    every POST — it does not dedup server-side). Returns ``None`` if the response
+    carries no parseable id, so scheduling still succeeds even if the shape drifts.
+    """
+    time.sleep(1.0)  # manual rate limit
+    resp = client.client.request(
+        "POST",
+        "connectapi",
+        f"/workout-service/schedule/{workout_id}",
+        json={"date": date},
+    )
+    logger.info("  Scheduled Garmin workout %s for %s", workout_id, date)
+    try:
+        data = resp.json() if hasattr(resp, "json") else resp
+        return data.get("workoutScheduleId") if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def unschedule_workout(client: Garmin, scheduled_id: int | str) -> None:
+    """Remove a calendar entry (``workoutScheduleId``) without deleting the workout."""
+    time.sleep(1.0)  # manual rate limit
+    client.client.request(
+        "DELETE", "connectapi", f"/workout-service/schedule/{scheduled_id}"
+    )
+    logger.info("  Unscheduled Garmin calendar entry %s", scheduled_id)
+
+
 def generate_description(workout: dict, calories: int | None = None, avg_hr: int | None = None) -> str:
     """Generate a text description for a gym workout."""
     lines: list[str] = []

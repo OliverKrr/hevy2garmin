@@ -6,7 +6,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,16 +17,26 @@ from hevy2garmin.garmin import (
     GarminUploadRejected,
     activity_matches_start_time,
     activities_for_workout,
+    create_workout,
     delete_activity,
+    delete_workout,
     find_activity_by_start_time,
     generate_description,
     get_client,
+    list_workouts,
     rename_activity,
+    schedule_workout,
     set_description,
+    unschedule_workout,
     upload_fit,
 )
 from hevy2garmin.hevy import HevyClient
 from hevy2garmin.mapper import lookup_exercise
+from hevy2garmin.routine import (
+    ROUTINE_DESC_MARKER,
+    routine_to_garmin_workout,
+    workout_content_hash,
+)
 from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
 from hevy2garmin.db_interface import Database
 
@@ -37,6 +47,20 @@ except Exception:  # pragma: no cover
     _hr_limiter = None
 
 logger = logging.getLogger("hevy2garmin")
+
+
+def _resolve_store() -> Any:
+    """Return the active ``Database`` singleton, or the ``db`` module facade as fallback."""
+    candidate = db.get_db() if callable(getattr(db, "get_db", None)) else None
+    return candidate if isinstance(candidate, Database) else db
+
+
+def _cache_routines_total(store: Any, count: int) -> None:
+    """Cache the routine count so the dashboard can show "pending" without a Hevy call."""
+    try:
+        store.set_app_config("routines_total", {"count": count})
+    except Exception:
+        logger.debug("Could not cache routines_total", exc_info=True)
 
 
 @dataclass
@@ -379,18 +403,79 @@ def sync_one_workout(
         merge_fallback = False
 
     if merge_delete_id is not None and not dry_run:
-        # Deletion is allowed only after the best-known source HR is durable.
-        # This runs even when HR embedding is disabled: disabling fusion should
-        # not discard the only recoverable high-resolution recording.
-        from hevy2garmin.hr import require_activity_hr_backup
+        # Replace wants to delete the watch activity. That is only safe once the
+        # watch's high-resolution HR is durably backed up so it can be embedded
+        # in the named replacement. Runs even with HR embedding disabled:
+        # disabling fusion must not discard the only recoverable recording.
+        from hevy2garmin.hr import HRBackupError, backup_activity_hr
 
-        protected_source_hr = require_activity_hr_backup(
-            merge_store,
-            garmin_client,
-            workout,
-            merge_delete_id,
-            _hr_limiter,
-        )
+        try:
+            protected_source_hr = backup_activity_hr(
+                merge_store, garmin_client, workout, merge_delete_id, _hr_limiter,
+            ) or None
+        except HRBackupError as exc:
+            logger.warning(
+                "  ⚠ Could not durably back up HR from watch activity %s: %s",
+                merge_delete_id, exc,
+            )
+            protected_source_hr = None
+
+        if protected_source_hr is None:
+            # The watch's hi-res HR could not be preserved (e.g. the FIT has no
+            # per-record HR, or the download failed). Deleting the watch copy
+            # would lose that HR for good, so instead of aborting the whole sync
+            # (#244 regression) fall back to merging the sets into the watch
+            # activity in place: the watch and its HR stay, the structured sets
+            # land, and the exercise names show as placeholders. Always syncs and
+            # never loses HR — only the named-exercise nicety is dropped when the
+            # HR cannot be preserved.
+            logger.info(
+                "  ⚠ Hi-res HR unavailable for watch activity %s; keeping it and "
+                "merging sets in place instead of replacing (names may show as Unknown)",
+                merge_delete_id,
+            )
+            fallback = attempt_merge(
+                garmin_client,
+                workout,
+                merge_store,
+                overlap_threshold=merge_overlap_pct,
+                max_drift_minutes=merge_max_drift_min,
+                activity_types=merge_activity_types,
+                watch_strategy="merge",
+            )
+            if fallback.merged:
+                fit_stats = _estimate_fit_stats(workout)
+                merge_store.mark_synced(
+                    hevy_id=wid,
+                    garmin_activity_id=str(fallback.activity_id),
+                    title=title,
+                    calories=fit_stats.get("calories"),
+                    avg_hr=fit_stats.get("avg_hr"),
+                    hevy_updated_at=workout.get("updated_at"),
+                    sync_method="merge",
+                )
+                logger.info(
+                    "  ⚡ Merged sets into watch activity %s (HR preserved in place)",
+                    fallback.activity_id,
+                )
+                return SyncOneResult(
+                    status="synced",
+                    activity_id=fallback.activity_id,
+                    sync_method="merge",
+                    merged=True,
+                    calories=fit_stats.get("calories"),
+                    avg_hr=fit_stats.get("avg_hr"),
+                )
+            # In-place merge also failed. Do NOT delete the watch activity —
+            # leave it intact and upload a fresh named activity alongside it, so
+            # the workout still syncs and nothing is lost.
+            logger.warning(
+                "  In-place merge fallback failed (%s); uploading a named activity "
+                "without removing the watch copy",
+                fallback.fallback_reason,
+            )
+            merge_delete_id = None
+            merge_forced_fresh = True
 
     hr_samples = None
     if not dry_run and hr_fusion_on:
@@ -568,8 +653,7 @@ def sync(
         Dict with sync stats: synced, skipped, failed, total, unmapped.
     """
     cfg = config or load_config()
-    candidate_store = db.get_db() if callable(getattr(db, "get_db", None)) else None
-    store = candidate_store if isinstance(candidate_store, Database) else db
+    store = _resolve_store()
     hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
     garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
     garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
@@ -718,3 +802,450 @@ def sync(
         )
 
     return stats
+
+
+def fetch_all_routines(hevy: HevyClient, page_size: int = 10) -> list[dict]:
+    """Fetch every Hevy routine (paginated). Returns a list of routine dicts."""
+    routines: list[dict] = []
+    page = 1
+    while True:
+        data = hevy.get_routines(page, page_size)
+        batch = data.get("routines", [])
+        routines.extend(batch)
+        logger.info("  Routines page %d/%s — %d", page, data.get("page_count", "?"), len(batch))
+        if page >= data.get("page_count", page):
+            break
+        page += 1
+    return routines
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """True only when ``exc`` is a Garmin HTTP 404 (the calendar entry is already gone).
+
+    garth raises ``requests`` ``HTTPError`` carrying ``response.status_code``; trust only
+    that. A missing status is treated as transient (keep the row and re-raise) rather than
+    string-matching "404" in the message — a transient error whose text merely contains
+    404 (a scheduleId, a retry delay like ``40400ms``) would otherwise drop the row, the
+    exact orphan this guard prevents.
+    """
+    resp = getattr(exc, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) == 404
+
+
+def _reschedule_routine(
+    client, store, hevy_routine_id, workout_id, dates: list[str], *, unschedule_prior: bool = True
+) -> None:
+    """Book ``dates`` for a routine's workout, replacing its prior calendar entries.
+
+    Garmin appends a fresh calendar entry on every schedule POST (no server-side
+    dedup), so re-scheduling would stack duplicates. We unschedule every entry we
+    previously tracked for this routine first, then book the new dates and record
+    the ids Garmin returns so the next reschedule can clean them up too.
+
+    ``unschedule_prior=False`` skips the unschedule calls — used when the workout was
+    just deleted (its calendar entries already cascaded away on Garmin), so hitting
+    the schedule endpoint for each stale id would only waste rate-limited 404s.
+    """
+    if unschedule_prior:
+        for old_id in store.get_routine_schedule_ids(hevy_routine_id):
+            try:
+                unschedule_workout(client, old_id)
+            except Exception:
+                logger.warning("  Could not unschedule stale calendar entry %s", old_id)
+    store.clear_routine_schedules(hevy_routine_id)
+    for day in dates:
+        schedule_id = schedule_workout(client, workout_id, day)
+        if schedule_id is not None:
+            store.add_routine_schedule(hevy_routine_id, str(schedule_id), day)
+
+
+def _build_library_by_name(garmin_client) -> dict[str, list[dict]]:
+    """Map ``workoutName`` -> ``[{"id", "description"}, ...]`` of the workouts already in
+    the Garmin library, so a sync can reconcile against Garmin's actual state before
+    creating (not just the local DB row) — a DB reset or a crash in the create->persist
+    window would otherwise leave an untracked workout that gets recreated as a duplicate.
+    Best-effort: if the listing fails we fall back to DB-only dedup.
+    """
+    library_by_name: dict[str, list[dict]] = {}
+    try:
+        for w in list_workouts(garmin_client, limit=999):
+            name, wid = w.get("workoutName"), w.get("workoutId")
+            if name and wid is not None:
+                library_by_name.setdefault(name, []).append(
+                    {"id": str(wid), "description": w.get("description") or ""}
+                )
+    except Exception:
+        logger.warning("Could not list Garmin workouts; falling back to DB-only dedup")
+    return library_by_name
+
+
+def _sync_one_routine(
+    routine: dict,
+    store,
+    garmin_client,
+    library_by_name: dict[str, list[dict]],
+    *,
+    weight_unit: str,
+    default_rest_seconds: int | None,
+    schedule_date: str | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    """Sync one Hevy routine to a Garmin planned workout.
+
+    Returns ``{"outcome": "created"|"updated"|"skipped"|"failed", "scheduled": 0|1}``.
+    Shared by :func:`sync_routines` (bulk) and :func:`sync_routine` (single) so both
+    paths behave identically. Catches its own errors and reports ``"failed"``.
+    """
+    rid = routine.get("id", "unknown")
+    title = routine.get("title") or routine.get("name") or "Routine"
+    updated_at = routine.get("updated_at")
+    try:
+        payload = routine_to_garmin_workout(
+            routine, weight_unit=weight_unit, default_rest_seconds=default_rest_seconds
+        )
+        content_hash = workout_content_hash(payload)
+
+        # Skip when the generated payload is byte-for-byte what we last synced AND the
+        # workout is fully landed. A row left in 'schedule_pending' isn't done, so we
+        # don't skip it — the next sync retries the schedule below. --force overrides.
+        existing = store.get_synced_routine(rid)
+        content_synced = bool(existing and existing.get("content_hash") == content_hash)
+        already_done = content_synced and (existing.get("status") or "success") == "success"
+        if not force and already_done:
+            logger.debug("Skipping routine %s (%s) — unchanged", rid, title)
+            return {"outcome": "skipped", "scheduled": 0}
+
+        # A prior sync record means this run replaces it (an update), not a new create.
+        outcome = "updated" if existing else "created"
+
+        if dry_run:
+            verb = "update" if existing else "create"
+            logger.info(
+                "[dry-run] Would %s Garmin workout '%s' with %d step(s)",
+                verb, title, len(payload["workoutSegments"][0]["workoutSteps"]),
+            )
+            return {"outcome": outcome, "scheduled": 0}
+
+        # Content changed (or forced) — drop the stale Garmin workout(s) first: the
+        # DB-tracked id plus any same-named library entry carrying our provenance marker
+        # (an orphan from a crash or DB reset). Same-named entries without the marker are
+        # the user's own workouts and are left untouched.
+        stale_ids = set()
+        if existing and existing.get("garmin_workout_id"):
+            stale_ids.add(str(existing["garmin_workout_id"]))
+        for entry in library_by_name.get(payload["workoutName"], []):
+            if ROUTINE_DESC_MARKER in entry["description"]:
+                stale_ids.add(entry["id"])
+        for wid in stale_ids:
+            try:
+                delete_workout(garmin_client, wid)
+            except Exception:
+                logger.warning("  Could not delete stale/orphan workout %s", wid)
+
+        workout_id = create_workout(garmin_client, payload)
+        if workout_id is None:
+            logger.warning("  Garmin did not return a workoutId for '%s'", title)
+            return {"outcome": "failed", "scheduled": 0}
+
+        # Recreating the workout drops the calendar entries the old one had, so re-apply
+        # the prior schedule when this run doesn't set a new one. An explicit schedule_date
+        # overrides; otherwise restore every date the routine had booked (recurring), with
+        # a fallback to the single stored date for rows predating per-entry tracking. Only
+        # an explicit schedule_date counts toward the "scheduled" stat.
+        if schedule_date:
+            dates_to_book = [schedule_date]
+        else:
+            dates_to_book = store.get_routine_scheduled_dates(rid)
+            if not dates_to_book and (existing or {}).get("scheduled_date"):
+                dates_to_book = [existing["scheduled_date"]]
+        effective_schedule_date = min(dates_to_book) if dates_to_book else None
+
+        scheduled = 0
+        if dates_to_book:
+            # Persist the created workout before scheduling, marked 'schedule_pending', so
+            # a schedule failure leaves it tracked (recovered next sync) not orphaned.
+            store.mark_routine_synced(
+                rid, garmin_workout_id=str(workout_id), title=title,
+                hevy_updated_at=updated_at, scheduled_date=effective_schedule_date,
+                content_hash=content_hash, status="schedule_pending",
+            )
+            # The old workout (and its calendar entries) was just deleted, so its tracked
+            # ids are already gone — clear+rebook without a rate-limited unschedule per id.
+            _reschedule_routine(
+                garmin_client, store, rid, workout_id, dates_to_book, unschedule_prior=False
+            )
+            if schedule_date:
+                scheduled = 1
+
+        store.mark_routine_synced(
+            rid, garmin_workout_id=str(workout_id), title=title,
+            hevy_updated_at=updated_at, scheduled_date=effective_schedule_date,
+            content_hash=content_hash,
+        )
+        return {"outcome": outcome, "scheduled": scheduled}
+    except Exception:
+        logger.exception("Failed to sync routine %s (%s)", rid, title)
+        return {"outcome": "failed", "scheduled": 0}
+
+
+def sync_routines(
+    config: dict[str, Any] | None = None,
+    dry_run: bool = False,
+    schedule_date: str | None = None,
+    force: bool = False,
+    **overrides: Any,
+) -> dict:
+    """Sync Hevy routines (templates) to Garmin as planned workouts.
+
+    Each Hevy routine becomes a planned workout in the Garmin Workouts library
+    (not an uploaded activity). A routine is skipped when the workout payload it
+    now produces hashes identically to the last one synced; otherwise the old
+    Garmin workout is deleted and recreated. Because the hash covers the
+    *generated payload*, changes to this builder (e.g. new rest steps) re-sync
+    automatically without ``--force``. When ``schedule_date`` (an ISO
+    ``YYYY-MM-DD``) is given, each created workout is also scheduled onto the
+    Garmin calendar for that date; otherwise only the library entry is created.
+
+    Args:
+        config: Config dict (loaded from file if None).
+        dry_run: Build payloads and log them, but don't call Garmin.
+        schedule_date: Optional ``YYYY-MM-DD`` to schedule the workouts.
+        force: Re-create every routine even when its payload hash is unchanged
+            (deletes the old Garmin workout first).
+        **overrides: Override config values (hevy_api_key, garmin_email, garmin_password).
+
+    Returns:
+        Dict with stats: created, skipped, failed, scheduled, total.
+    """
+    cfg = config or load_config()
+    store = _resolve_store()
+    hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
+    garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
+    garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
+    garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
+    # ``or {}`` guards against a config key present but explicitly null.
+    weight_unit = (cfg.get("sync") or {}).get("weight_unit", "kilogram")
+    # Fallback rest between sets when a Hevy routine doesn't specify one, mirroring
+    # the FIT timing default used for logged workouts.
+    default_rest_seconds = (cfg.get("timing") or {}).get("rest_between_sets_seconds", 75)
+
+    hevy = HevyClient(api_key=hevy_api_key)
+    routines = fetch_all_routines(hevy)
+    logger.info("Fetched %d routines to process", len(routines))
+    _cache_routines_total(store, len(routines))
+
+    garmin_client = None
+    library_by_name: dict[str, list[dict]] = {}
+    if not dry_run:
+        logger.info("Authenticating with Garmin Connect...")
+        garmin_client = get_client(garmin_email, garmin_password, garmin_token_dir)
+        logger.info("Authenticated successfully")
+        library_by_name = _build_library_by_name(garmin_client)
+
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+        "scheduled": 0,
+        "total": len(routines),
+    }
+
+    for routine in routines:
+        res = _sync_one_routine(
+            routine, store, garmin_client, library_by_name,
+            weight_unit=weight_unit, default_rest_seconds=default_rest_seconds,
+            schedule_date=schedule_date, force=force, dry_run=dry_run,
+        )
+        stats[res["outcome"]] += 1
+        stats["scheduled"] += res["scheduled"]
+
+    logger.info(
+        "Routine sync done — created=%d updated=%d skipped=%d failed=%d scheduled=%d",
+        stats["created"], stats["updated"], stats["skipped"], stats["failed"], stats["scheduled"],
+    )
+    return stats
+
+
+def sync_routine(
+    hevy_routine_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    force: bool = False,
+    **overrides: Any,
+) -> dict:
+    """Sync a single Hevy routine to Garmin (the per-row "Sync" action).
+
+    Fetches the routine from Hevy, reconciles against the Garmin library, and runs the
+    same per-routine logic as :func:`sync_routines`. Returns
+    ``{"outcome": ..., "row": {id, title, exercises, exercise_count, synced, scheduled_date}}`` —
+    ``row`` is a render-ready dict for the routines card. Raises ``ValueError`` when the
+    routine isn't found in the Hevy account.
+    """
+    cfg = config or load_config()
+    store = _resolve_store()
+    hevy_api_key = overrides.get("hevy_api_key") or cfg.get("hevy_api_key")
+    garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
+    garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
+    garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
+    weight_unit = (cfg.get("sync") or {}).get("weight_unit", "kilogram")
+    default_rest_seconds = (cfg.get("timing") or {}).get("rest_between_sets_seconds", 75)
+
+    hevy = HevyClient(api_key=hevy_api_key)
+    routine = next(
+        (r for r in fetch_all_routines(hevy) if r.get("id") == hevy_routine_id), None
+    )
+    if routine is None:
+        raise ValueError("Routine not found in Hevy")
+
+    logger.info("Authenticating with Garmin Connect...")
+    garmin_client = get_client(garmin_email, garmin_password, garmin_token_dir)
+    library_by_name = _build_library_by_name(garmin_client)
+    res = _sync_one_routine(
+        routine, store, garmin_client, library_by_name,
+        weight_unit=weight_unit, default_rest_seconds=default_rest_seconds,
+        schedule_date=None, force=force, dry_run=False,
+    )
+
+    record = store.get_synced_routine(hevy_routine_id)
+    exercises = [
+        {
+            "name": ex.get("title") or ex.get("name") or "Exercise",
+            "sets": len(ex.get("sets") or []),
+        }
+        for ex in (routine.get("exercises") or [])
+    ]
+    row = {
+        "id": hevy_routine_id,
+        "title": routine.get("title") or routine.get("name") or "Routine",
+        "exercises": exercises,
+        "exercise_count": len(exercises),
+        "synced": record is not None,
+        "scheduled_date": (record or {}).get("scheduled_date"),
+    }
+    logger.info("Synced routine %s — %s", hevy_routine_id, res["outcome"])
+    return {"outcome": res["outcome"], "row": row}
+
+
+# Cap on recurring occurrences, so a typo in "weeks" can't schedule years of entries.
+MAX_SCHEDULE_OCCURRENCES = 52
+
+
+def routine_schedule_dates(
+    mode: str,
+    *,
+    date: str | None = None,
+    weekday: int | str | None = None,
+    start_date: str | None = None,
+    weeks: int | str | None = None,
+) -> list[str]:
+    """Compute the calendar dates to schedule a routine on.
+
+    ``mode="once"`` returns ``[date]``. ``mode="recurring"`` returns one date per
+    week for ``weeks`` weeks, on the given ``weekday`` (0=Monday .. 6=Sunday),
+    starting at the first matching weekday on or after ``start_date``. All inputs
+    are ISO ``YYYY-MM-DD`` strings; raises ``ValueError`` on missing/invalid data.
+    """
+    if mode == "once":
+        if not date:
+            raise ValueError("a date is required for a one-off schedule")
+        return [_date.fromisoformat(date).isoformat()]
+
+    if mode == "recurring":
+        if weekday is None or start_date in (None, "") or weeks in (None, ""):
+            raise ValueError("weekday, start_date and weeks are required for a recurring schedule")
+        weekday = int(weekday)
+        weeks = int(weeks)
+        if not 0 <= weekday <= 6:
+            raise ValueError("weekday must be 0 (Monday) .. 6 (Sunday)")
+        if weeks < 1:
+            raise ValueError("weeks must be at least 1")
+        weeks = min(weeks, MAX_SCHEDULE_OCCURRENCES)
+        start = _date.fromisoformat(start_date)
+        first = start + timedelta(days=(weekday - start.weekday()) % 7)
+        return [(first + timedelta(weeks=i)).isoformat() for i in range(weeks)]
+
+    raise ValueError(f"unknown schedule mode: {mode!r}")
+
+
+def schedule_routine(
+    hevy_routine_id: str,
+    dates: list[str],
+    *,
+    config: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict:
+    """Schedule an already-synced routine's Garmin workout on the given dates.
+
+    Looks up the routine's ``garmin_workout_id`` (it must have been synced first),
+    then calls the Garmin schedule endpoint once per date. Persists the earliest
+    date on the routine record for display. Returns
+    ``{"scheduled": n, "workout_id": id, "dates": [...]}``.
+    """
+    if not dates:
+        raise ValueError("no dates to schedule")
+
+    cfg = config or load_config()
+    store = _resolve_store()
+
+    record = store.get_synced_routine(hevy_routine_id)
+    if not record or not record.get("garmin_workout_id"):
+        raise ValueError("Routine is not synced yet — sync it before scheduling.")
+    workout_id = record["garmin_workout_id"]
+
+    garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
+    garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
+    garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
+
+    logger.info("Authenticating with Garmin Connect...")
+    client = get_client(garmin_email, garmin_password, garmin_token_dir)
+
+    # Unschedule the routine's prior calendar entries before booking the new dates,
+    # so re-scheduling replaces rather than stacks duplicate entries (Garmin appends).
+    _reschedule_routine(client, store, hevy_routine_id, workout_id, dates)
+
+    store.mark_routine_synced(
+        hevy_routine_id,
+        garmin_workout_id=workout_id,
+        title=record.get("title", ""),
+        hevy_updated_at=record.get("hevy_updated_at"),
+        scheduled_date=min(dates),
+        content_hash=record.get("content_hash"),
+    )
+    logger.info("Scheduled routine %s on %d date(s)", hevy_routine_id, len(dates))
+    return {"scheduled": len(dates), "workout_id": workout_id, "dates": dates}
+
+
+def unschedule_routine_entry(
+    hevy_routine_id: str,
+    schedule_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> None:
+    """Remove one Garmin calendar entry of a routine and stop tracking it.
+
+    Unscheduling is best-effort — an entry already gone on Garmin just 404s — but
+    the local row is always dropped afterward so the UI reflects the removal.
+    """
+    cfg = config or load_config()
+    store = _resolve_store()
+    garmin_email = overrides.get("garmin_email") or cfg.get("garmin_email")
+    garmin_password = overrides.get("garmin_password") or cfg.get("garmin_password", "")
+    garmin_token_dir = cfg.get("garmin_token_dir", "~/.garminconnect")
+
+    logger.info("Authenticating with Garmin Connect...")
+    client = get_client(garmin_email, garmin_password, garmin_token_dir)
+    try:
+        unschedule_workout(client, schedule_id)
+    except Exception as e:
+        # A 404 means the entry is already gone on Garmin — safe to drop our row. Any
+        # other error (429/500/network) is transient: keep the row and re-raise so the
+        # caller surfaces the failure and the user can retry, instead of orphaning a
+        # calendar entry we can no longer see or remove.
+        if not _is_not_found(e):
+            raise
+        logger.info("  Calendar entry %s already gone on Garmin", schedule_id)
+    store.delete_routine_schedule(hevy_routine_id, schedule_id)
+    logger.info("Unscheduled routine %s entry %s", hevy_routine_id, schedule_id)
