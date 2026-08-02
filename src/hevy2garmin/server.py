@@ -1791,7 +1791,7 @@ async def api_sync_single(request: Request, workout_id: str):
 
         garmin_client = get_client(config.get("garmin_email"))
         # Manual single-workout upload from the workouts page — bypass grace.
-        sync_one_workout(
+        one = sync_one_workout(
             workout,
             cfg=config,
             garmin_client=garmin_client,
@@ -1799,10 +1799,16 @@ async def api_sync_single(request: Request, workout_id: str):
             respect_grace=False,
             database=db.get_db(),
         )
+        _record_sync_log(
+            {"synced": 1 if one.status == "synced" else 0,
+             "failed": 1 if one.status == "failed" else 0},
+            trigger="manual (single)",
+        )
 
         start = (workout.get("start_time") or "")[:16]
         return HTMLResponse(f'<tr><td><span class="badge badge-success">✓ Synced</span></td><td>{start}</td><td><strong>{workout["title"]}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
     except Exception as e:
+        _record_sync_log({"failed": 1}, trigger="manual (single)")
         return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {e}</td>')
 
 
@@ -2258,6 +2264,24 @@ async def api_setup_actions(request: Request):
 @app.post("/api/sync-one")
 async def api_sync_one(request: Request):
     """Sync exactly 1 unsynced workout. Returns JSON with status."""
+    # Manual Sync Now — bypass grace so the user gets an immediate upload.
+    return await _sync_one_recorded(request, respect_grace=False, trigger="manual (one)")
+
+
+async def _sync_one_recorded(
+    request: Request,
+    *,
+    respect_grace: bool = False,
+    trigger: str = "manual (one)",
+):
+    """Take the sync lock, sync one workout, and record it in the sync log.
+
+    Shared by every single-workout trigger so each one shows up on /history.
+    Dashboard and cron syncs previously left no trace, which made "what ran
+    this sync?" unanswerable when diagnosing a sync that stopped happening.
+    """
+    import json as _json
+
     from fastapi.responses import JSONResponse
 
     if is_demo_mode():
@@ -2267,10 +2291,17 @@ async def api_sync_one(request: Request):
         return JSONResponse({"error": "Sync already running", "busy": True})
 
     try:
-        # Manual Sync Now — bypass grace so the user gets an immediate upload.
-        return await _do_sync_one(request, respect_grace=False)
+        resp = await _do_sync_one(request, respect_grace=respect_grace)
     finally:
         _sync_executing.release()
+
+    try:
+        data = _json.loads(bytes(resp.body))
+        failed = 1 if (data.get("error") or data.get("skipped_error")) else 0
+        _record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
+    except Exception:
+        logger.debug("sync_log record failed", exc_info=True)
+    return resp
 
 
 def _scan_for_unsynced(hevy, is_synced, total_count, failed_ids, on_page=None):
@@ -2467,17 +2498,8 @@ async def cron_sync(request: Request):
         if auth != f"Bearer {cron_secret}":
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    if is_demo_mode():
-        return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
-
-    if not _acquire_sync_lock():
-        return JSONResponse({"error": "Sync already running", "busy": True})
-
-    try:
-        # Cron/autosync — respect grace so watch activities can land first.
-        return await _do_sync_one(request, respect_grace=True)
-    finally:
-        _sync_executing.release()
+    # Cron/autosync — respect grace so watch activities can land first.
+    return await _sync_one_recorded(request, respect_grace=True, trigger="cron")
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
