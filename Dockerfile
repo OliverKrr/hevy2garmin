@@ -25,14 +25,18 @@ RUN pip install --no-cache-dir .
 
 FROM python:3.12-slim
 
+RUN groupadd --system --gid 999 nonroot \
+ && useradd --system --gid 999 --uid 999 --create-home nonroot
+
 # Only the finished virtualenv crosses over — no build tools, no sources.
-COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder --chown=nonroot:nonroot /opt/venv /opt/venv
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-WORKDIR /app
+USER nonroot
+WORKDIR /home/nonroot
 
 EXPOSE 8123
 

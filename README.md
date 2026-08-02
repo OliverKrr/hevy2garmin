@@ -216,14 +216,14 @@ docker build -t hevy2garmin .
 
 Before running in Docker, you need Garmin auth tokens. Either:
 - Run `pip install hevy2garmin && hevy2garmin init` locally (if you have Python), or
-- Run `docker run -it -v ~/.garminconnect:/root/.garminconnect hevy2garmin init` to set up inside Docker interactively
+- Run `docker run -it -v ~/.garminconnect:/home/nonroot/.garminconnect hevy2garmin init` to set up inside Docker interactively
 
 **Web dashboard with auto-sync:**
 
 ```bash
 docker run -d -p 8123:8123 --restart unless-stopped \
-  -v ~/.hevy2garmin:/root/.hevy2garmin \
-  -v ~/.garminconnect:/root/.garminconnect \
+  -v ~/.hevy2garmin:/home/nonroot/.hevy2garmin \
+  -v ~/.garminconnect:/home/nonroot/.garminconnect \
   -e HEVY_API_KEY=... \
   -e GARMIN_EMAIL=... \
   hevy2garmin serve
@@ -235,8 +235,8 @@ Open [localhost:8123](http://localhost:8123) and enable auto-sync on the dashboa
 
 ```bash
 docker run --rm \
-  -v ~/.hevy2garmin:/root/.hevy2garmin \
-  -v ~/.garminconnect:/root/.garminconnect \
+  -v ~/.hevy2garmin:/home/nonroot/.hevy2garmin \
+  -v ~/.garminconnect:/home/nonroot/.garminconnect \
   -e HEVY_API_KEY=... \
   -e GARMIN_EMAIL=... \
   hevy2garmin sync
