@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -40,6 +41,14 @@ logger = logging.getLogger("hevy2garmin")
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Sub-path this app is served under when it sits behind a reverse proxy that
+# mounts it below the origin root (X-Forwarded-Prefix, e.g. "/apps/hevy2garmin").
+# Empty for a normal root install. Set per request by the middleware and handed
+# to every template: a proxy can rewrite root-absolute href/src/action
+# attributes in the HTML it forwards, but it cannot rewrite URLs that the page's
+# JavaScript builds at runtime, so those must be prefixed at render time.
+_url_prefix: contextvars.ContextVar[str] = contextvars.ContextVar("url_prefix", default="")
 
 
 def _get_cat_names() -> dict[int, str]:
@@ -81,6 +90,7 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
     ctx.setdefault("auth_enabled", auth_enabled())
     ctx.setdefault("demo_mode", is_demo_mode())
     ctx.setdefault("version", __version__)
+    ctx.setdefault("url_prefix", _url_prefix.get())
     return HTMLResponse(t.render(**ctx))
 
 
@@ -407,6 +417,11 @@ async def check_setup(request: Request, call_next):
     path = request.url.path
     secret = os.environ.get("HEVY2GARMIN_SECRET")
 
+    # Remember the reverse-proxy sub-path for this request so templates can
+    # build client-side URLs under it. The trailing slash is trimmed so callers
+    # concatenate a leading-slash path (prefix + "/api/...").
+    _url_prefix.set(request.headers.get("x-forwarded-prefix", "").rstrip("/"))
+
     # Static resources: pass through, no auth, no cookie
     if path == "/favicon.ico" or path.startswith("/static"):
         return await call_next(request)
@@ -485,7 +500,9 @@ async def login_page(request: Request):
     if not auth_enabled() or verify_session(request.cookies.get(SESSION_COOKIE), _session_epoch()):
         return RedirectResponse("/")
     error = request.query_params.get("error")
-    return HTMLResponse(_jinja_env.get_template("login.html").render(error=error))
+    return HTMLResponse(
+        _jinja_env.get_template("login.html").render(error=error, url_prefix=_url_prefix.get())
+    )
 
 
 @app.post("/login")
@@ -504,7 +521,7 @@ async def login_submit(request: Request, password: str = Form(...)):
 
     def _error(msg: str, status: int) -> HTMLResponse:
         return HTMLResponse(
-            _jinja_env.get_template("login.html").render(error=msg),
+            _jinja_env.get_template("login.html").render(error=msg, url_prefix=_url_prefix.get()),
             status_code=status,
         )
 
