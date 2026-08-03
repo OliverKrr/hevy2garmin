@@ -151,6 +151,14 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
                     from hevy2garmin.intervals_icu import try_delete_icu_activity
 
                     try_delete_icu_activity(int(watch_id), workout_start)
+
+                    # Strava already pulled the watch copy from Garmin, and
+                    # deletions don't propagate (there is no delete API), so
+                    # rename + mute it instead. No-op unless Strava creds are
+                    # set; never raises.
+                    from hevy2garmin.strava import try_mute_strava_activity
+
+                    try_mute_strava_activity(int(watch_id), workout_start)
                 step = "commit"
                 store.update_pending(wid, next_step=step, last_error=None)
         _complete(store, wid, payload, activity_id)
