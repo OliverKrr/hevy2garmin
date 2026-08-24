@@ -352,6 +352,13 @@ def _run_autosync() -> None:
     _last_sync_time = datetime.now(timezone.utc)
     _record_sync_log(result, trigger="auto")
 
+    # Our replacement reaches Strava through Garmin's push, which lags the sync
+    # by an unknown amount — so the Strava observation opened at delete time has
+    # to be revisited on a schedule to see what arrived. Read-only; never raises.
+    from hevy2garmin.strava import recheck_observations
+
+    recheck_observations()
+
     # Reschedule
     _schedule_autosync(auto_cfg.get("interval_minutes", 30))
 

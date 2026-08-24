@@ -120,3 +120,174 @@ def test_list_or_mute_failure_never_raises(strava_env):
         req.get.return_value = _resp([{"id": 22, "external_id": "g999", "name": "S"}])
         req.put.return_value = _resp(raise_exc=RuntimeError("403"))
         assert try_mute_strava_activity(999, START) is False
+
+
+# ---------------------------------------------------------------------------
+# Report-only observation
+# ---------------------------------------------------------------------------
+
+from hevy2garmin.strava import (  # noqa: E402
+    format_observations,
+    observe_window,
+    recheck_observations,
+)
+
+HEVY_START = "2026-08-20T17:23:51+00:00"
+HEVY_END = "2026-08-20T18:16:01+00:00"  # 3130s, the real 2026-08-20 workout
+
+
+def _act(**over):
+    """A Strava summary activity; defaults to the real 2026-08-20 watch copy."""
+    base = {
+        "id": 19827514920,
+        "start_date": "2026-08-20T17:25:07Z",
+        "elapsed_time": 3046,
+        "moving_time": 3046,
+        "sport_type": "WeightTraining",
+        "name": "Fitti Gym",
+        "external_id": "garmin_ping_616353485847",
+        "upload_id": 20961348735,
+        "manual": False,
+        "device_name": None,
+        "hide_from_home": False,
+    }
+    base.update(over)
+    return base
+
+
+_OURS = _act(id=1, start_date="2026-08-20T17:23:51Z", elapsed_time=3130,
+             name="Evening workout 🏋️", external_id="garmin_ping_999")
+
+
+class _Store:
+    """Minimal app-config store standing in for the DB."""
+
+    def __init__(self):
+        self.data = {}
+
+    def get_app_config(self, key):
+        return self.data.get(key)
+
+    def set_app_config(self, key, value):
+        self.data[key] = value
+
+
+@pytest.fixture
+def store(monkeypatch):
+    s = _Store()
+    import hevy2garmin.db as real_db
+
+    monkeypatch.setattr(real_db, "get_db", lambda: s)
+    return s
+
+
+def _window(activities):
+    """Patch the activity listing and the token so no network is touched."""
+    return (
+        patch("hevy2garmin.strava._get_access_token", return_value="tok"),
+        patch("hevy2garmin.strava.requests.get", return_value=_resp(activities)),
+    )
+
+
+def _observe(activities, store, **kw):
+    tok, get = _window(activities)
+    with tok, get:
+        observe_window(
+            hevy_id=kw.get("hevy_id", "w1"),
+            workout_start=HEVY_START,
+            workout_end=HEVY_END,
+            watch_activity_id=24052777390,
+            replacement_activity_id=24052777391,
+        )
+    return store.data.get("strava_observations", {}).get("records", [])
+
+
+def test_observe_records_the_window_and_writes_nothing(strava_env, store):
+    tok, get = _window([_act()])
+    with tok, get, patch("hevy2garmin.strava.requests.put") as put:
+        observe_window(hevy_id="w1", workout_start=HEVY_START, workout_end=HEVY_END,
+                       watch_activity_id=1, replacement_activity_id=2)
+        put.assert_not_called()
+    records = store.data["strava_observations"]["records"]
+    assert len(records) == 1
+    assert records[0]["hevy_duration_s"] == 3130
+    assert len(records[0]["snapshots"]) == 1
+
+
+def test_watch_copy_is_not_mistaken_for_ours(strava_env, store):
+    """The real 2026-08-20 copy sits +76s/-84s off Hevy — it must read as stale."""
+    entry = _observe([_act()], store)[0]["snapshots"][0]["activities"][0]
+    assert (entry["delta_start_s"], entry["delta_elapsed_s"]) == (76, -84)
+    assert entry["verdict"] == "stale"
+
+
+def test_our_own_copy_matches_hevy_exactly(strava_env, store):
+    record = _observe([_OURS], store)[0]
+    assert record["snapshots"][0]["activities"][0]["verdict"] == "ours"
+    assert record["ours_present"] is True
+    assert record["stale_count"] == 0
+
+
+def test_hevy_direct_post_is_labelled_separately(strava_env, store):
+    hevy_post = _act(id=3, start_date="2026-08-20T17:23:51Z", elapsed_time=3130,
+                     manual=True, device_name="Hevy", external_id=None)
+    verdicts = [a["verdict"] for a in _observe([hevy_post], store)[0]["snapshots"][0]["activities"]]
+    assert verdicts == ["hevy_direct"]
+
+
+def test_non_strength_activities_are_ignored(strava_env, store):
+    ride = _act(id=4, sport_type="Ride", name="Cool Down")
+    ids = [a["id"] for a in _observe([ride, _act()], store)[0]["snapshots"][0]["activities"]]
+    assert ids == [_act()["id"]]
+
+
+def test_recheck_appends_only_when_the_window_changed(strava_env, store):
+    _observe([_act()], store)
+    tok, get = _window([_act()])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert len(record["snapshots"]) == 1  # unchanged → no new snapshot
+    assert record["checks"] == 2
+
+    tok, get = _window([_act(), _OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert len(record["snapshots"]) == 2
+    assert record["closed"] is True
+    assert record["closed_reason"] == "duplicate_confirmed"
+
+
+def test_recheck_never_writes_to_strava(strava_env, store):
+    _observe([_act()], store)
+    tok, get = _window([_act(), _OURS])
+    with tok, get, patch("hevy2garmin.strava.requests.put") as put:
+        recheck_observations()
+        put.assert_not_called()
+
+
+def test_observation_failures_never_raise(strava_env, store):
+    with patch("hevy2garmin.strava._get_access_token", return_value="tok"), \
+         patch("hevy2garmin.strava.requests.get", side_effect=RuntimeError("boom")):
+        observe_window(hevy_id="w1", workout_start=HEVY_START, workout_end=HEVY_END)
+        recheck_observations()
+
+
+def test_observe_is_noop_without_credentials(monkeypatch, store):
+    for k in ENV:
+        monkeypatch.delenv(k, raising=False)
+    with patch("hevy2garmin.strava.requests") as req:
+        observe_window(hevy_id="w1", workout_start=HEVY_START, workout_end=HEVY_END)
+        req.get.assert_not_called()
+    assert store.data == {}
+
+
+def test_format_observations_renders_a_timeline(strava_env, store):
+    _observe([_act()], store)
+    out = format_observations()
+    assert "hevy=w1" in out and "watch_copy_deleted" in out and "stale" in out
+
+
+def test_format_observations_with_no_records(store):
+    assert "No Strava observations" in format_observations()

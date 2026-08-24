@@ -300,6 +300,13 @@ def cmd_map(args: argparse.Namespace) -> None:
     print(f"  Saved to ~/.hevy2garmin/custom_mappings.json")
 
 
+def cmd_strava_observations(args: argparse.Namespace) -> None:
+    """Print the report-only Strava observation timeline (see strava.py)."""
+    from hevy2garmin.strava import format_observations
+
+    print(format_observations())
+
+
 def cmd_pending(args: argparse.Namespace) -> None:
     rows = [db.get_pending(args.hevy_id)] if args.hevy_id else db.list_pending()
     rows = [row for row in rows if row]
@@ -464,6 +471,10 @@ def main() -> None:
     serve_parser.add_argument("-p", "--port", type=int, default=8123, help="Port (default: 8123)")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Host (default: 0.0.0.0)")
 
+    subparsers.add_parser(
+        "strava-observations",
+        help="Show the recorded Strava duplicate-observation timeline (read-only)")
+
     # hash-password
     hashpw_parser = subparsers.add_parser(
         "hash-password", help="Generate an argon2 hash for H2G_PASSWORD_HASH")
@@ -500,6 +511,7 @@ def main() -> None:
             "mark-synced": cmd_mark_synced,
             "skip": cmd_skip,
             "hash-password": cmd_hash_password,
+            "strava-observations": cmd_strava_observations,
         }
         commands[args.command](args)
     except RuntimeError as e:

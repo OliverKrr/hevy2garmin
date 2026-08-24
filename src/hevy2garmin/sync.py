@@ -156,9 +156,23 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
                     # deletions don't propagate (there is no delete API), so
                     # rename + mute it instead. No-op unless Strava creds are
                     # set; never raises.
-                    from hevy2garmin.strava import try_mute_strava_activity
+                    from hevy2garmin.strava import observe_window, try_mute_strava_activity
 
                     try_mute_strava_activity(int(watch_id), workout_start)
+
+                    # …and record what Strava holds right now, before our
+                    # replacement could have been pushed. The mute above has
+                    # never matched (external_id is garmin_ping_<pingId>, not
+                    # the activity id), and the account has not reliably shown
+                    # the pair it is meant to disambiguate, so the rule has to
+                    # be chosen from an observed timeline. Read-only.
+                    observe_window(
+                        hevy_id=wid,
+                        workout_start=workout_start,
+                        workout_end=(payload.get("workout") or {}).get("end_time", ""),
+                        watch_activity_id=watch_id,
+                        replacement_activity_id=activity_id,
+                    )
                 step = "commit"
                 store.update_pending(wid, next_step=step, last_error=None)
         _complete(store, wid, payload, activity_id)
