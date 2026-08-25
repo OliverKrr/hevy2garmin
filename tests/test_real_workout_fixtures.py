@@ -1,12 +1,19 @@
 """Integration tests over the real (sanitized) Hevy workout history.
 
-``tests/fixtures/real_workouts.json`` holds the complete workout history of
-this fork's deployment (titles, exercise template ids, set structures — no
-descriptions or account data). It is the regression corpus for the two paths
-where quality bugs actually surfaced: exercise mapping and FIT generation.
+``tests/fixtures/real_workouts.json`` is a real Hevy workout history, exported
+and anonymized (ids and titles synthetic, dates moved to a synthetic weekly
+schedule, weights rounded — see ``scripts/export_workout_fixtures.py``). What
+survives is exactly what these tests exercise: exercise titles, template ids and
+set structures. No notes, descriptions or account data.
 
-Regenerate/extend with ``scripts/export_workout_fixtures.py`` after new
-workouts introduce new exercises.
+Synthetic fixtures test the mapper against the cases we thought of. This corpus
+tests it against the ones a real training log actually contains, which is where
+the mapping and FIT-generation bugs kept surfacing — a template id that maps to
+a category the FIT SDK does not define, or an exercise whose sets encode to an
+empty file.
+
+Regenerate or extend it against your own account with
+``HEVY_API_KEY=... python scripts/export_workout_fixtures.py``.
 """
 
 from __future__ import annotations
