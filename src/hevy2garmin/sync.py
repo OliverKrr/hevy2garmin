@@ -152,20 +152,16 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
 
                     try_delete_icu_activity(int(watch_id), workout_start)
 
-                    # Strava already pulled the watch copy from Garmin, and
-                    # deletions don't propagate (there is no delete API), so
-                    # rename + mute it instead. No-op unless Strava creds are
-                    # set; never raises.
-                    from hevy2garmin.strava import observe_window, try_mute_strava_activity
+                    # Strava already pulled the watch copy from Garmin and
+                    # deletions don't propagate, so it lingers there. It cannot
+                    # be cleaned up yet: our replacement has not been pushed to
+                    # Strava, and muting the only copy would hide the workout.
+                    # Record the window instead — everything in it right now
+                    # predates our upload, which is what later identifies the
+                    # stale copy. Read-only; the write, if enabled, happens in
+                    # strava.recheck_observations once our copy has arrived.
+                    from hevy2garmin.strava import observe_window
 
-                    try_mute_strava_activity(int(watch_id), workout_start)
-
-                    # …and record what Strava holds right now, before our
-                    # replacement could have been pushed. The mute above has
-                    # never matched (external_id is garmin_ping_<pingId>, not
-                    # the activity id), and the account has not reliably shown
-                    # the pair it is meant to disambiguate, so the rule has to
-                    # be chosen from an observed timeline. Read-only.
                     observe_window(
                         hevy_id=wid,
                         workout_start=workout_start,

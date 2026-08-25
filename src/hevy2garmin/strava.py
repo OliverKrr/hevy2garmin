@@ -1,37 +1,48 @@
 """Optional Strava cleanup: mute the stale watch copy after a replace-merge.
 
-Called from the replace path when an original watch activity is deleted from
-Garmin. Garmin has already pushed that watch recording to Strava (deletions do
-not propagate), and the named replacement upload will be pushed too — leaving
-a duplicate pair. Strava's public API has no DELETE endpoint, so the best we
-can do is rename the stale copy (easy to spot for manual deletion) and mute it
-(``hide_from_home`` — removed from followers' feeds; still counts in stats).
+When the replace path deletes a watch activity from Garmin, Garmin has usually
+already pushed that recording to Strava, and deletions do not propagate. Our
+named replacement is pushed separately, later, leaving a duplicate pair. Strava
+has no DELETE endpoint for activities, so the most a cleanup can do is rename
+the stale copy with ``DUP_PREFIX`` and set ``hide_from_home`` — out of
+followers' feeds, still in the athlete's totals, still easy to find and delete
+by hand.
 
-This runs only for confirmed Hevy-matched duplicates by construction — it is
-invoked from the same step that deletes the Garmin watch copy, never for
-standalone watch workouts.
+The hard part is not the write, it is knowing *which* copy is stale, and every
+attempt to answer that from a single look at the window has been wrong:
 
-Only runs when STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET and STRAVA_REFRESH_TOKEN
-are set. Strava rotates refresh tokens: the latest one is persisted to the app
-config store (DB) when possible, with the env var as bootstrap. All errors are
-swallowed — never breaks the merge flow.
+- ``external_id`` does not carry the Garmin activity id the way intervals.icu's
+  does. It is ``garmin_ping_<pingId>``, Garmin's push-notification id, unrelated
+  to the activity (23767105780 arrived as ``garmin_ping_605244121726``). The
+  original matcher keyed on this and never once fired.
+- ``start_date`` is Strava's first *record* timestamp, not the FIT session
+  start, and HR fusion gives our upload the watch's samples — so both copies of
+  a session report the same start.
+- ``device_name`` looks decisive on any single pair and is not: merge-era watch
+  recordings report ``None`` exactly like our uploads do.
 
-KNOWN NOT TO MATCH, verified 2026-08-03 against a live account. The matcher
-below assumes a Garmin-pushed Strava activity carries the Garmin activity id in
-``external_id``. It does not: the real value is ``garmin_ping_<pingId>``, where
-the ping id is Garmin's push-notification id and bears no relation to the
-activity id (observed: hevy2garmin recorded 23767105780, the corresponding
-Strava activity had ``garmin_ping_605244121726``). So every lookup misses and
-the duplicate stays on Strava.
+So this module does not try to recognise the stale copy at all. It observes.
+``observe_window`` snapshots the window at the moment the watch copy is deleted
+from Garmin — before our replacement exists anywhere, so before Garmin could
+have pushed it — and keeps that as the record's baseline. Anything in it
+predates our upload and therefore cannot be ours; anything appearing later is.
+``recheck_observations`` re-snapshots from the sync paths until our copy shows
+up, and only then, and only in ``mute`` mode, does it write.
 
-It fails safe, which is why it is still here unchanged: a time-only match is
-deliberately never trusted, so it warns and does nothing rather than muting
-whatever happens to be nearby. Fixing it needs a different discriminator, and
-picking one blind is not safe — the *replacement* activity is pushed to Strava
-from Garmin too, in the same window, with the same activity type and the same
-``garmin_ping_`` shape, so a sloppy rule would mute the good activity instead
-of the stale one. Run ``scripts/strava_match_check.py`` (read-only) to see what
-the account actually returns before changing the rule.
+That ordering is the safety property: **a stale copy is only ever muted in a
+window where our own copy is confirmed present**, so the workout always keeps a
+visible representation on Strava. The end delta (our copy lands exactly on the
+Hevy end, a watch recording runs past it) is recorded as corroboration and is
+the fallback when the baseline could not be taken, but never decides a write on
+its own.
+
+Runs only when STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET and STRAVA_REFRESH_TOKEN
+are set, and writes only when STRAVA_CLEANUP_MODE=mute. Strava rotates refresh
+tokens: the latest is persisted to the app config store (DB), with the env var
+as bootstrap. All errors are swallowed — this must never break a sync.
+
+Inspect what has been recorded with ``hevy2garmin strava-observations``;
+``scripts/strava_match_check.py`` is an ad-hoc read-only probe of the raw API.
 
 What the account has shown (read-only sweep 2026-08-24 over 14 months, plus the
 first observed pair on 2026-08-25):
@@ -77,6 +88,26 @@ logger = logging.getLogger("hevy2garmin")
 _BASE_URL = "https://www.strava.com/api/v3"
 _TOKEN_KEY = "strava_tokens"
 DUP_PREFIX = "[dup] "
+
+# What the cleanup is allowed to do:
+#   off     — nothing at all, not even the read-only observation
+#   report  — observe and log; never touches Strava (default)
+#   mute    — observe, and once a duplicate is confirmed, rename the stale copy
+#             with DUP_PREFIX and hide it from followers' feeds
+#
+# The default is deliberately not "mute". Strava has no DELETE endpoint, so the
+# write is a rename plus hide_from_home on a public feed, and every earlier
+# attempt to identify the stale copy from timings alone was wrong. Arm it per
+# deployment once its own observations look right.
+_MODES = ("off", "report", "mute")
+
+
+def _mode() -> str:
+    mode = os.environ.get("STRAVA_CLEANUP_MODE", "report").strip().lower()
+    if mode not in _MODES:
+        logger.warning("Strava: unknown STRAVA_CLEANUP_MODE %r, treating as 'report'", mode)
+        return "report"
+    return mode
 
 
 def _load_refresh_token() -> str:
@@ -125,87 +156,6 @@ def _get_access_token(client_id: str, client_secret: str) -> str | None:
     if new_refresh and new_refresh != refresh_token:
         _store_refresh_token(new_refresh)
     return data.get("access_token")
-
-
-def try_mute_strava_activity(garmin_activity_id: int, workout_start: str) -> bool:
-    """Rename + mute the Strava copy of a deleted Garmin watch activity.
-
-    Locates the activity in a ±2-hour window around ``workout_start`` whose
-    ``external_id`` carries the Garmin activity id (Garmin-synced Strava
-    activities embed it). No match → warn and do nothing; a time-only match is
-    deliberately never trusted, so the wrong activity can't be touched.
-
-    Returns True if muted, False otherwise. Never raises.
-    """
-    client_id = os.environ.get("STRAVA_CLIENT_ID", "")
-    client_secret = os.environ.get("STRAVA_CLIENT_SECRET", "")
-    if not client_id or not client_secret:
-        return False
-
-    base_url = os.environ.get("STRAVA_BASE_URL", _BASE_URL).rstrip("/")
-
-    try:
-        start = datetime.fromisoformat(workout_start.replace("Z", "+00:00"))
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        logger.warning("Strava cleanup: invalid workout_start %r", workout_start)
-        return False
-
-    access_token = _get_access_token(client_id, client_secret)
-    if not access_token:
-        return False
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    try:
-        resp = requests.get(
-            f"{base_url}/athlete/activities",
-            headers=headers,
-            params={
-                "after": int((start - timedelta(hours=2)).timestamp()),
-                "before": int((start + timedelta(hours=2)).timestamp()),
-                "per_page": 30,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        activities = resp.json()
-    except Exception as e:
-        logger.warning("Strava cleanup: failed to list activities: %s", e)
-        return False
-
-    target = None
-    for act in activities:
-        if str(garmin_activity_id) in str(act.get("external_id") or ""):
-            target = act
-            break
-
-    if target is None:
-        logger.warning(
-            "Strava cleanup: no activity with external_id containing %s in ±2h window — "
-            "a stale duplicate may remain on Strava",
-            garmin_activity_id,
-        )
-        return False
-
-    name = target.get("name") or "Workout"
-    new_name = name if name.startswith(DUP_PREFIX) else f"{DUP_PREFIX}{name}"
-    try:
-        resp = requests.put(
-            f"{base_url}/activities/{target['id']}",
-            headers=headers,
-            json={"hide_from_home": True, "name": new_name},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        logger.info(
-            "  Strava cleanup: muted activity %s (garmin_id=%s) as %r",
-            target["id"], garmin_activity_id, new_name,
-        )
-        return True
-    except Exception as e:
-        logger.warning("Strava cleanup: failed to mute activity %s: %s", target.get("id"), e)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +415,54 @@ def _snapshot(record: dict, headers: dict, base_url: str, phase: str) -> bool:
     return True
 
 
+def _mute(headers: dict, base_url: str, entry: dict) -> bool:
+    """Rename an activity with DUP_PREFIX and hide it from followers' feeds.
+
+    The only cleanup Strava's API permits — there is no DELETE for activities —
+    so the stale copy stays in the athlete's totals and stays findable, just
+    marked and out of the feed. Never raises.
+    """
+    name = entry.get("name") or "Workout"
+    new_name = name if name.startswith(DUP_PREFIX) else f"{DUP_PREFIX}{name}"
+    try:
+        resp = requests.put(
+            f"{base_url}/activities/{entry['id']}",
+            headers=headers,
+            json={"hide_from_home": True, "name": new_name},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Strava cleanup: failed to mute activity %s: %s", entry.get("id"), e)
+        return False
+    logger.info("  Strava cleanup: muted activity %s as %r", entry["id"], new_name)
+    return True
+
+
+def _clean_up(record: dict, headers: dict, base_url: str) -> list[dict]:
+    """Mute every stale copy in ``record``'s latest snapshot. Returns the results.
+
+    Only ever called once ``ours_present`` is true, so the workout is guaranteed
+    to keep a visible representation on Strava. The targets come from the
+    baseline — what was already in the window before our upload existed — never
+    from a timing match.
+    """
+    snapshots = record.get("snapshots") or []
+    if not snapshots:
+        return []
+    results = []
+    for raw in snapshots[-1].get("activities") or []:
+        entry = _derive(raw, record)
+        if entry["verdict"] != "stale":
+            continue
+        results.append({
+            "id": entry["id"],
+            "at": _utcnow_iso(),
+            "muted": _mute(headers, base_url, entry),
+        })
+    return results
+
+
 def _session() -> tuple[dict, str] | None:
     client_id = os.environ.get("STRAVA_CLIENT_ID", "")
     client_secret = os.environ.get("STRAVA_CLIENT_SECRET", "")
@@ -491,6 +489,8 @@ def observe_window(
     which is what makes the later comparison meaningful.
     """
     try:
+        if _mode() == "off":
+            return
         session = _session()
         if session is None:
             return
@@ -527,6 +527,9 @@ def recheck_observations() -> None:
     answer the question. Never raises, never writes to Strava.
     """
     try:
+        mode = _mode()
+        if mode == "off":
+            return
         records = _load_records()
         cutoff = datetime.now(timezone.utc) - timedelta(days=_OBSERVE_DAYS)
         open_records = [
@@ -541,11 +544,17 @@ def recheck_observations() -> None:
         headers, base_url = session
         for record in open_records:
             _snapshot(record, headers, base_url, phase="recheck")
-            # Both copies seen together is the whole point of watching; stop
-            # there. Anything still ambiguous keeps its slot until it ages out.
+            # Our copy and a stale one seen together is the whole point of
+            # watching: it is the only state in which a write is safe, because
+            # the workout provably keeps a visible copy on Strava afterwards.
             if record.get("ours_present") and record.get("stale_count"):
+                if mode == "mute":
+                    record["cleanup"] = _clean_up(record, headers, base_url)
+                    # Re-read so the timeline shows the write as Strava has it,
+                    # rather than as we assume it landed.
+                    _snapshot(record, headers, base_url, phase="after_mute")
                 record["closed"] = True
-                record["closed_reason"] = "duplicate_confirmed"
+                record["closed_reason"] = "duplicate_cleaned" if mode == "mute" else "duplicate_confirmed"
             elif (_parse_iso(record.get("opened_at")) or cutoff) <= cutoff:
                 record["closed"] = True
                 record["closed_reason"] = "aged_out"

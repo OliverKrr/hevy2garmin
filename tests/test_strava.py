@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from hevy2garmin.strava import try_mute_strava_activity
+from hevy2garmin.strava import DUP_PREFIX, _get_access_token
 
 ENV = {
     "STRAVA_CLIENT_ID": "123",
     "STRAVA_CLIENT_SECRET": "sec",
     "STRAVA_REFRESH_TOKEN": "refresh-1",
 }
-START = "2026-03-15T18:00:00+00:00"
 
 
 @pytest.fixture
@@ -38,88 +37,25 @@ def _no_db():
     return patch("hevy2garmin.strava._load_refresh_token", return_value="refresh-1")
 
 
-def test_no_env_vars_is_noop(monkeypatch):
-    for k in ENV:
-        monkeypatch.delenv(k, raising=False)
-    with patch("hevy2garmin.strava.requests") as req:
-        assert try_mute_strava_activity(999, START) is False
-        req.post.assert_not_called()
-        req.get.assert_not_called()
-
-
-def test_watch_copy_is_muted_and_renamed(strava_env):
-    activities = [
-        {"id": 11, "external_id": "garmin_ping_888.fit", "name": "Other"},
-        {"id": 22, "external_id": "garmin_ping_999.fit", "name": "Strength"},
-    ]
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp({"access_token": "at", "refresh_token": "refresh-1"})
-        req.get.return_value = _resp(activities)
-        req.put.return_value = _resp({})
-
-        assert try_mute_strava_activity(999, START) is True
-
-        put_args, put_kwargs = req.put.call_args
-        assert put_args[0] == "https://www.strava.com/api/v3/activities/22"
-        assert put_kwargs["json"] == {"hide_from_home": True, "name": "[dup] Strength"}
-
-
-def test_dup_prefix_not_stacked(strava_env):
-    activities = [{"id": 22, "external_id": "g999", "name": "[dup] Strength"}]
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp({"access_token": "at"})
-        req.get.return_value = _resp(activities)
-        req.put.return_value = _resp({})
-        assert try_mute_strava_activity(999, START) is True
-        assert req.put.call_args.kwargs["json"]["name"] == "[dup] Strength"
-
-
-def test_no_external_id_match_touches_nothing(strava_env):
-    # Time-window matches alone must never be trusted.
-    activities = [{"id": 33, "external_id": "garmin_ping_777.fit", "name": "Strength"}]
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp({"access_token": "at"})
-        req.get.return_value = _resp(activities)
-        assert try_mute_strava_activity(999, START) is False
-        req.put.assert_not_called()
-
-
-def test_token_refresh_failure_is_noop(strava_env):
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp(raise_exc=RuntimeError("401"))
-        assert try_mute_strava_activity(999, START) is False
-        req.get.assert_not_called()
+def test_token_refresh_failure_yields_no_session(strava_env):
+    with _no_db(), patch("hevy2garmin.strava.requests.post", return_value=_resp(raise_exc=RuntimeError("nope"))):
+        assert _get_access_token("123", "sec") is None
 
 
 def test_rotated_refresh_token_is_persisted(strava_env):
-    with (
-        patch("hevy2garmin.strava.requests") as req,
-        patch("hevy2garmin.strava._load_refresh_token", return_value="refresh-1"),
-        patch("hevy2garmin.strava._store_refresh_token") as store,
-    ):
-        req.post.return_value = _resp({"access_token": "at", "refresh_token": "refresh-2"})
-        req.get.return_value = _resp([])
-        try_mute_strava_activity(999, START)
-        store.assert_called_once_with("refresh-2")
+    tokens = {"access_token": "at", "refresh_token": "refresh-2"}
+    with _no_db(), patch("hevy2garmin.strava.requests.post", return_value=_resp(tokens)), \
+         patch("hevy2garmin.strava._store_refresh_token") as store_tok:
+        assert _get_access_token("123", "sec") == "at"
+        store_tok.assert_called_once_with("refresh-2")
 
 
-def test_invalid_workout_start_is_noop(strava_env):
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        assert try_mute_strava_activity(999, "not-a-date") is False
-        req.get.assert_not_called()
-
-
-def test_list_or_mute_failure_never_raises(strava_env):
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp({"access_token": "at"})
-        req.get.side_effect = RuntimeError("network down")
-        assert try_mute_strava_activity(999, START) is False
-
-    with patch("hevy2garmin.strava.requests") as req, _no_db():
-        req.post.return_value = _resp({"access_token": "at"})
-        req.get.return_value = _resp([{"id": 22, "external_id": "g999", "name": "S"}])
-        req.put.return_value = _resp(raise_exc=RuntimeError("403"))
-        assert try_mute_strava_activity(999, START) is False
+def test_unrotated_refresh_token_is_not_rewritten(strava_env):
+    tokens = {"access_token": "at", "refresh_token": "refresh-1"}
+    with _no_db(), patch("hevy2garmin.strava.requests.post", return_value=_resp(tokens)), \
+         patch("hevy2garmin.strava._store_refresh_token") as store_tok:
+        assert _get_access_token("123", "sec") == "at"
+        store_tok.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -368,3 +304,97 @@ def test_baseline_is_recovered_from_a_pre_existing_delete_time_snapshot(strava_e
     assert record["basis"] == "baseline"
     verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
     assert verdicts == {_act()["id"]: "stale", _OURS["id"]: "ours"}
+
+
+# ---------------------------------------------------------------------------
+# STRAVA_CLEANUP_MODE
+# ---------------------------------------------------------------------------
+
+
+def _confirm_pair(store, monkeypatch, mode):
+    """Drive a record to the confirmed-duplicate state under ``mode``."""
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", mode)
+    _observe([_act()], store)
+    tok, get = _window([_act(), _OURS])
+    with tok, get, patch("hevy2garmin.strava.requests.put") as put:
+        recheck_observations()
+    return store.data.get("strava_observations", {}).get("records", [{}])[0], put
+
+
+def test_report_is_the_default_and_never_writes(strava_env, store, monkeypatch):
+    monkeypatch.delenv("STRAVA_CLEANUP_MODE", raising=False)
+    _observe([_act()], store)
+    tok, get = _window([_act(), _OURS])
+    with tok, get, patch("hevy2garmin.strava.requests.put") as put:
+        recheck_observations()
+        put.assert_not_called()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["closed_reason"] == "duplicate_confirmed"
+    assert "cleanup" not in record
+
+
+def test_off_disables_observation_entirely(strava_env, store, monkeypatch):
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "off")
+    with patch("hevy2garmin.strava.requests") as req:
+        observe_window(hevy_id="w1", workout_start=HEVY_START, workout_end=HEVY_END)
+        recheck_observations()
+        req.get.assert_not_called()
+    assert store.data == {}
+
+
+def test_an_unknown_mode_falls_back_to_report(strava_env, store, monkeypatch):
+    record, put = _confirm_pair(store, monkeypatch, "shout")
+    put.assert_not_called()
+    assert record["closed_reason"] == "duplicate_confirmed"
+
+
+def test_mute_writes_only_to_the_stale_copy(strava_env, store, monkeypatch):
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    _observe([_act()], store)
+    muted = _act(name=f"{DUP_PREFIX}{_act()['name']}", hide_from_home=True)
+    tok = patch("hevy2garmin.strava._get_access_token", return_value="tok")
+    get = patch("hevy2garmin.strava.requests.get",
+                side_effect=[_resp([_act(), _OURS]), _resp([muted, _OURS])])
+    with tok, get, patch("hevy2garmin.strava.requests.put", return_value=_resp({})) as put:
+        recheck_observations()
+    assert put.call_count == 1
+    url, kwargs = put.call_args[0][0], put.call_args[1]
+    assert str(_act()["id"]) in url and str(_OURS["id"]) not in url
+    assert kwargs["json"] == {"hide_from_home": True, "name": f"{DUP_PREFIX}Afternoon Weight Training"}
+    record = store.data["strava_observations"]["records"][0]
+    assert record["cleanup"] == [{"id": _act()["id"], "at": ANY, "muted": True}]
+    assert record["closed_reason"] == "duplicate_cleaned"
+    assert record["snapshots"][-1]["phase"] == "after_mute"
+
+
+def test_mute_never_fires_while_our_copy_is_absent(strava_env, store, monkeypatch):
+    """The safety rule: no write in a window that holds only the stale copy."""
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    _observe([_act()], store)
+    tok, get = _window([_act()])
+    with tok, get, patch("hevy2garmin.strava.requests.put") as put:
+        recheck_observations()
+        put.assert_not_called()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["closed"] is False
+
+
+def test_dup_prefix_is_not_stacked(strava_env, store, monkeypatch):
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    already = _act(name=f"{DUP_PREFIX}Afternoon Weight Training")
+    _observe([already], store)
+    tok = patch("hevy2garmin.strava._get_access_token", return_value="tok")
+    get = patch("hevy2garmin.strava.requests.get", return_value=_resp([already, _OURS]))
+    with tok, get, patch("hevy2garmin.strava.requests.put", return_value=_resp({})) as put:
+        recheck_observations()
+    assert put.call_args[1]["json"]["name"] == f"{DUP_PREFIX}Afternoon Weight Training"
+
+
+def test_a_failed_mute_is_recorded_not_raised(strava_env, store, monkeypatch):
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    _observe([_act()], store)
+    tok, get = _window([_act(), _OURS])
+    with tok, get, patch("hevy2garmin.strava.requests.put", side_effect=RuntimeError("403")):
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["cleanup"] == [{"id": _act()["id"], "at": ANY, "muted": False}]
