@@ -196,6 +196,13 @@ def _window(activities):
     )
 
 
+def _entries(record, index=-1):
+    """Snapshots store raw fields; interpretation is derived on read."""
+    from hevy2garmin.strava import _derive
+
+    return [_derive(a, record) for a in record["snapshots"][index]["activities"]]
+
+
 def _observe(activities, store, **kw):
     tok, get = _window(activities)
     with tok, get:
@@ -227,14 +234,14 @@ def test_anything_in_the_baseline_is_stale_whatever_its_timings(strava_env, stor
     _OURS ends exactly at the Hevy end — the shape of our own copy — yet if it
     was already there when we deleted the watch activity, it cannot be ours.
     """
-    entry = _observe([_OURS], store)[0]["snapshots"][0]["activities"][0]
+    entry = _entries(_observe([_OURS], store)[0], 0)[0]
     assert entry["delta_end_s"] == 0
     assert entry["verdict"] == "stale"
 
 
 def test_watch_copy_ends_after_the_hevy_workout(strava_env, store):
     """The real 2026-08-25 pair shared a start; only the end separated them."""
-    entry = _observe([_act()], store)[0]["snapshots"][0]["activities"][0]
+    entry = _entries(_observe([_act()], store)[0], 0)[0]
     assert (entry["delta_start_s"], entry["delta_end_s"]) == (64, 16)
     assert entry["verdict"] == "stale"
 
@@ -245,7 +252,7 @@ def test_a_late_arrival_ending_at_the_hevy_end_is_ours(strava_env, store):
     with tok, get:
         recheck_observations()
     record = store.data["strava_observations"]["records"][0]
-    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
     assert verdicts == {_act()["id"]: "stale", _OURS["id"]: "ours"}
     assert record["basis"] == "baseline"
 
@@ -258,7 +265,7 @@ def test_a_late_arrival_with_unrelated_timings_is_not_claimed_as_ours(strava_env
     with tok, get:
         recheck_observations()
     record = store.data["strava_observations"]["records"][0]
-    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
     assert verdicts[7] == "unknown"
     assert record["ours_present"] is False
     assert record["closed"] is False
@@ -276,14 +283,14 @@ def test_a_failed_baseline_fetch_never_backfills_a_later_one(strava_env, store):
     record = store.data["strava_observations"]["records"][0]
     assert record["baseline_ids"] is None
     assert record["basis"] == "time_only"
-    verdicts = sorted(a["verdict"] for a in record["snapshots"][-1]["activities"])
+    verdicts = sorted(a["verdict"] for a in _entries(record))
     assert verdicts == ["ours?", "stale?"]
 
 
 def test_hevy_direct_post_is_labelled_separately(strava_env, store):
     hevy_post = _act(id=3, start_date="2026-08-20T17:23:51Z", elapsed_time=3130,
                      manual=True, device_name="Hevy", external_id=None)
-    verdicts = [a["verdict"] for a in _observe([hevy_post], store)[0]["snapshots"][0]["activities"]]
+    verdicts = [a["verdict"] for a in _entries(_observe([hevy_post], store)[0], 0)]
     assert verdicts == ["hevy_direct"]
 
 
@@ -359,5 +366,5 @@ def test_baseline_is_recovered_from_a_pre_existing_delete_time_snapshot(strava_e
     record = store.data["strava_observations"]["records"][0]
     assert record["baseline_ids"] == [_act()["id"]]
     assert record["basis"] == "baseline"
-    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
     assert verdicts == {_act()["id"]: "stale", _OURS["id"]: "ours"}

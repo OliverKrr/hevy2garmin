@@ -261,6 +261,11 @@ def _parse_iso(value: object) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
+def _delta(value: object) -> str:
+    """``+64s`` / ``-8s`` / ``?`` — used by both the log lines and the timeline."""
+    return f"{value:+}s" if isinstance(value, int) else "?"
+
+
 def _classify(entry: dict, baseline_ids: set | None) -> str:
     """Label one Strava activity. Provenance decides; timing only corroborates.
 
@@ -292,18 +297,12 @@ def _classify(entry: dict, baseline_ids: set | None) -> str:
     return "ours" if end_aligned else "unknown"
 
 
-def _summarize(
-    act: dict,
-    hevy_start: datetime | None,
-    hevy_duration_s: int | None,
-    baseline_ids: set | None,
-) -> dict:
-    start = _parse_iso(act.get("start_date"))
-    elapsed = act.get("elapsed_time")
-    entry = {
+def _summarize(act: dict) -> dict:
+    """The raw Strava fields worth keeping. No interpretation — see ``_derive``."""
+    return {
         "id": act.get("id"),
         "start_date": act.get("start_date"),
-        "elapsed_time": elapsed,
+        "elapsed_time": act.get("elapsed_time"),
         "moving_time": act.get("moving_time"),
         "sport_type": act.get("sport_type") or act.get("type"),
         "name": act.get("name"),
@@ -312,18 +311,36 @@ def _summarize(
         "manual": act.get("manual"),
         "device_name": act.get("device_name"),
         "hide_from_home": act.get("hide_from_home"),
-        "delta_start_s": int((start - hevy_start).total_seconds()) if start and hevy_start else None,
-        "delta_elapsed_s": (int(elapsed) - hevy_duration_s) if isinstance(elapsed, int) and hevy_duration_s else None,
     }
-    # Where the activity *ends* relative to the Hevy workout. Unlike the start,
-    # which HR fusion makes identical for both copies, this separates them.
+
+
+def _derive(entry: dict, record: dict) -> dict:
+    """Entry plus the deltas and the verdict, computed against ``record``.
+
+    Interpretation is derived on read rather than frozen into the stored
+    snapshot, so a rule change re-reads the whole history correctly instead of
+    leaving old entries labelled by a rule that has since been disproved —
+    which is exactly what happened to the 2026-08-25 pair.
+    """
+    hevy_start = _parse_iso(record.get("hevy_start"))
+    hevy_duration_s = record.get("hevy_duration_s")
+    start = _parse_iso(entry.get("start_date"))
+    elapsed = entry.get("elapsed_time")
+    baseline = record.get("baseline_ids")
+    baseline_ids = set(baseline) if isinstance(baseline, list) else None
+
+    out = dict(entry)
+    out["delta_start_s"] = int((start - hevy_start).total_seconds()) if start and hevy_start else None
+    out["delta_elapsed_s"] = (
+        int(elapsed) - hevy_duration_s if isinstance(elapsed, int) and hevy_duration_s else None
+    )
     if start and hevy_start and hevy_duration_s and isinstance(elapsed, int):
         hevy_end = hevy_start + timedelta(seconds=hevy_duration_s)
-        entry["delta_end_s"] = int((start + timedelta(seconds=elapsed) - hevy_end).total_seconds())
+        out["delta_end_s"] = int((start + timedelta(seconds=elapsed) - hevy_end).total_seconds())
     else:
-        entry["delta_end_s"] = None
-    entry["verdict"] = _classify(entry, baseline_ids)
-    return entry
+        out["delta_end_s"] = None
+    out["verdict"] = _classify(out, baseline_ids)
+    return out
 
 
 def _load_records() -> list[dict]:
@@ -400,43 +417,43 @@ def _snapshot(record: dict, headers: dict, base_url: str, phase: str) -> bool:
             )
             record["baseline_ids"] = [a.get("id") for a in prior["activities"]] if prior else None
             record["baseline_at"] = prior.get("at") if prior else None
-    baseline = record.get("baseline_ids")
-    baseline_ids = set(baseline) if isinstance(baseline, list) else None
-
-    entries = sorted(
-        (_summarize(a, hevy_start, record.get("hevy_duration_s"), baseline_ids) for a in raw),
-        key=lambda e: str(e.get("start_date")),
-    )
+    entries = sorted((_summarize(a) for a in raw), key=lambda e: str(e.get("start_date")))
     snapshots = record.setdefault("snapshots", [])
     previous = snapshots[-1]["activities"] if snapshots else None
+
     # Ids alone would miss a rename or a mute done elsewhere, so compare the
     # fields we would act on.
     def fingerprint(items):
         return [(i.get("id"), i.get("name"), i.get("hide_from_home")) for i in items]
 
-    if previous is not None and fingerprint(previous) == fingerprint(entries):
-        return False
+    changed = previous is None or fingerprint(previous) != fingerprint(entries)
+    if changed:
+        snapshots.append({"at": _utcnow_iso(), "phase": phase, "activities": entries})
+        del snapshots[:-_OBSERVE_MAX_SNAPSHOTS]
 
-    snapshots.append({"at": _utcnow_iso(), "phase": phase, "activities": entries})
-    del snapshots[:-_OBSERVE_MAX_SNAPSHOTS]
-
-    verdicts = [e["verdict"] for e in entries]
+    # Refresh the summary even on an unchanged window: recovering a baseline, or
+    # a change to the rule, can move a verdict without the window moving at all.
+    derived = [_derive(e, record) for e in entries]
+    verdicts = [e["verdict"] for e in derived]
     ours, stale = verdicts.count("ours"), verdicts.count("stale")
     record["ours_present"] = ours > 0
     record["stale_count"] = stale
-    record["basis"] = "baseline" if baseline_ids is not None else "time_only"
+    record["basis"] = "baseline" if isinstance(record.get("baseline_ids"), list) else "time_only"
+    if not changed:
+        return False
+
     logger.info(
         "  Strava observe [%s, %s] hevy=%s: %d strength activit(y/ies) in window — "
         "ours=%d stale=%d hevy_direct=%d unknown=%d",
         phase, record["basis"], record.get("hevy_id"), len(entries), ours, stale,
         verdicts.count("hevy_direct"), verdicts.count("unknown"),
     )
-    for e in entries:
+    for e in derived:
         logger.info(
-            "    %-11s id=%s start=%s (%+ds) elapsed=%ss (%+ds) end(%+ds) name=%r "
+            "    %-11s id=%s start=%s (start%s end%s) elapsed=%ss name=%r "
             "external_id=%r upload_id=%s manual=%s device=%r hidden=%s",
-            e["verdict"], e["id"], e["start_date"], e["delta_start_s"] or 0, e["elapsed_time"],
-            e["delta_elapsed_s"] or 0, e["delta_end_s"] or 0, e["name"], e["external_id"],
+            e["verdict"], e["id"], e["start_date"], _delta(e["delta_start_s"]),
+            _delta(e["delta_end_s"]), e["elapsed_time"], e["name"], e["external_id"],
             e["upload_id"], e["manual"], e["device_name"], e["hide_from_home"],
         )
     if ours and stale:
@@ -542,10 +559,6 @@ def format_observations() -> str:
     records = _load_records()
     if not records:
         return "No Strava observations recorded yet."
-
-    def delta(value: object) -> str:
-        return f"{value:+}s" if isinstance(value, int) else "?"
-
     lines = []
     for r in records:
         lines.append(
@@ -561,11 +574,12 @@ def format_observations() -> str:
         )
         for snap in r.get("snapshots") or []:
             lines.append(f"    --- {snap.get('at')} [{snap.get('phase')}]")
-            for e in snap.get("activities") or []:
+            for raw in snap.get("activities") or []:
+                e = _derive(raw, r)
                 lines.append(
                     f"        {str(e.get('verdict')):<11} id={e.get('id')} "
-                    f"start={e.get('start_date')} (start{delta(e.get('delta_start_s'))} "
-                    f"end{delta(e.get('delta_end_s'))}) elapsed={e.get('elapsed_time')}s "
+                    f"start={e.get('start_date')} (start{_delta(e.get('delta_start_s'))} "
+                    f"end{_delta(e.get('delta_end_s'))}) elapsed={e.get('elapsed_time')}s "
                     f"name={e.get('name')!r} external_id={e.get('external_id')!r} "
                     f"upload_id={e.get('upload_id')} manual={e.get('manual')} "
                     f"device={e.get('device_name')!r} hidden={e.get('hide_from_home')}"
