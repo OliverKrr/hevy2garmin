@@ -132,31 +132,38 @@ from hevy2garmin.strava import (  # noqa: E402
     recheck_observations,
 )
 
-HEVY_START = "2026-08-20T17:23:51+00:00"
-HEVY_END = "2026-08-20T18:16:01+00:00"  # 3130s, the real 2026-08-20 workout
+# The one pair whose members can be named with certainty: 2026-08-25, where the
+# baseline snapshot proved which copy predated our upload. Hevy 15:58:54 +3976s
+# ends 17:05:10.
+HEVY_START = "2026-08-25T15:58:54+00:00"
+HEVY_END = "2026-08-25T17:05:10+00:00"
 
 
 def _act(**over):
-    """A Strava summary activity; defaults to the real 2026-08-20 watch copy."""
+    """The real 2026-08-25 watch copy: same start as ours, ending 16 s later."""
     base = {
-        "id": 19827514920,
-        "start_date": "2026-08-20T17:25:07Z",
-        "elapsed_time": 3046,
-        "moving_time": 3046,
+        "id": 19896022976,
+        "start_date": "2026-08-25T15:59:58Z",
+        "elapsed_time": 3928,
+        "moving_time": 3928,
         "sport_type": "WeightTraining",
-        "name": "Fitti Gym",
-        "external_id": "garmin_ping_616353485847",
-        "upload_id": 20961348735,
+        "name": "Afternoon Weight Training",
+        "external_id": "garmin_ping_618773181080",
+        "upload_id": 21031752727,
         "manual": False,
-        "device_name": None,
+        "device_name": "Garmin Enduro 3",
         "hide_from_home": False,
     }
     base.update(over)
     return base
 
 
-_OURS = _act(id=1, start_date="2026-08-20T17:23:51Z", elapsed_time=3130,
-             name="Evening workout 🏋️", external_id="garmin_ping_999")
+# Our replacement as Strava actually reported it the same day: an identical
+# start_date to the watch copy, because HR fusion gives our FIT the watch's
+# first sample — and an end exactly on the Hevy end.
+_OURS = _act(id=19896395261, elapsed_time=3912, moving_time=3912,
+             external_id="garmin_ping_618781907232", upload_id=21032129988,
+             device_name=None)
 
 
 class _Store:
@@ -210,22 +217,67 @@ def test_observe_records_the_window_and_writes_nothing(strava_env, store):
         put.assert_not_called()
     records = store.data["strava_observations"]["records"]
     assert len(records) == 1
-    assert records[0]["hevy_duration_s"] == 3130
+    assert records[0]["hevy_duration_s"] == 3976
     assert len(records[0]["snapshots"]) == 1
 
 
-def test_watch_copy_is_not_mistaken_for_ours(strava_env, store):
-    """The real 2026-08-20 copy sits +76s/-84s off Hevy — it must read as stale."""
-    entry = _observe([_act()], store)[0]["snapshots"][0]["activities"][0]
-    assert (entry["delta_start_s"], entry["delta_elapsed_s"]) == (76, -84)
+def test_anything_in_the_baseline_is_stale_whatever_its_timings(strava_env, store):
+    """The baseline predates our upload, so membership beats any timing signal.
+
+    _OURS ends exactly at the Hevy end — the shape of our own copy — yet if it
+    was already there when we deleted the watch activity, it cannot be ours.
+    """
+    entry = _observe([_OURS], store)[0]["snapshots"][0]["activities"][0]
+    assert entry["delta_end_s"] == 0
     assert entry["verdict"] == "stale"
 
 
-def test_our_own_copy_matches_hevy_exactly(strava_env, store):
-    record = _observe([_OURS], store)[0]
-    assert record["snapshots"][0]["activities"][0]["verdict"] == "ours"
-    assert record["ours_present"] is True
-    assert record["stale_count"] == 0
+def test_watch_copy_ends_after_the_hevy_workout(strava_env, store):
+    """The real 2026-08-25 pair shared a start; only the end separated them."""
+    entry = _observe([_act()], store)[0]["snapshots"][0]["activities"][0]
+    assert (entry["delta_start_s"], entry["delta_end_s"]) == (64, 16)
+    assert entry["verdict"] == "stale"
+
+
+def test_a_late_arrival_ending_at_the_hevy_end_is_ours(strava_env, store):
+    _observe([_act()], store)
+    tok, get = _window([_act(), _OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    assert verdicts == {_act()["id"]: "stale", _OURS["id"]: "ours"}
+    assert record["basis"] == "baseline"
+
+
+def test_a_late_arrival_with_unrelated_timings_is_not_claimed_as_ours(strava_env, store):
+    _observe([_act()], store)
+    other = _act(id=7, start_date="2026-08-25T18:00:00Z", elapsed_time=1200,
+                 name="Second session", device_name=None)
+    tok, get = _window([_act(), other])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    assert verdicts[7] == "unknown"
+    assert record["ours_present"] is False
+    assert record["closed"] is False
+
+
+def test_a_failed_baseline_fetch_never_backfills_a_later_one(strava_env, store):
+    """A baseline taken after our upload could contain our own copy — refuse it."""
+    with patch("hevy2garmin.strava._get_access_token", return_value="tok"), \
+         patch("hevy2garmin.strava.requests.get", side_effect=RuntimeError("down")):
+        observe_window(hevy_id="w1", workout_start=HEVY_START, workout_end=HEVY_END,
+                       watch_activity_id=1, replacement_activity_id=2)
+    tok, get = _window([_act(), _OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["baseline_ids"] is None
+    assert record["basis"] == "time_only"
+    verdicts = sorted(a["verdict"] for a in record["snapshots"][-1]["activities"])
+    assert verdicts == ["ours?", "stale?"]
 
 
 def test_hevy_direct_post_is_labelled_separately(strava_env, store):
@@ -257,6 +309,7 @@ def test_recheck_appends_only_when_the_window_changed(strava_env, store):
     assert len(record["snapshots"]) == 2
     assert record["closed"] is True
     assert record["closed_reason"] == "duplicate_confirmed"
+    assert record["ours_present"] is True and record["stale_count"] == 1
 
 
 def test_recheck_never_writes_to_strava(strava_env, store):

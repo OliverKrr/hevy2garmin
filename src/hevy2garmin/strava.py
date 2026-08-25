@@ -33,27 +33,35 @@ from Garmin too, in the same window, with the same activity type and the same
 of the stale one. Run ``scripts/strava_match_check.py`` (read-only) to see what
 the account actually returns before changing the rule.
 
-What the account has shown so far (probed read-only 2026-08-24, 14 months,
-133 strength activities):
+What the account has shown (read-only sweep 2026-08-24 over 14 months, plus the
+first observed pair on 2026-08-25):
 
-- The duplicate is **real but conditional**. 2026-05-02 holds three copies of
-  one session: the watch recording, our replacement (pushed by Garmin three
-  weeks later, when that workout was finally synced), and a third posted by
-  Hevy's own Strava integration.
-- On every same-evening sync since (2026-07-17 through 2026-08-20) the window
-  holds **one** activity, and it is the watch copy — our replacement never
-  arrives. Why the late sync got pushed and the prompt ones did not is unknown;
-  Strava rejecting a near-simultaneous overlapping upload is the leading guess.
-- ``device_name`` does not discriminate: merge-era activities, which are
-  definitely watch recordings, report ``None`` just like our uploads do.
-- Start time and duration **do**. We build the FIT from the Hevy workout, so
-  our copy matches it to the second (the 2026-05-02 one was exact); watch
-  recordings of the same session were never closer than 39 s on either.
+- The duplicate is **real**. On 2026-08-25 the window held one activity when we
+  deleted the watch copy from Garmin and two an hour later, the second pushed by
+  Garmin from our own replacement. 2026-05-02 holds three copies of one session,
+  the extra one posted by Hevy's own Strava integration.
+- It does not happen every time. Between 2026-07-17 and 2026-08-20 the window
+  held a single activity on every sync.
+- ``device_name`` does not decide it. On 2026-08-25 the watch copy reported
+  ``Garmin Enduro 3`` and ours ``None``, but merge-era activities — definitely
+  watch recordings, since merge neither uploads nor deletes — report ``None``
+  too.
+- ``start_date`` does not decide it either, and this is the trap: Strava reports
+  the first *record* timestamp rather than the FIT session start, and HR fusion
+  gives our upload the watch's samples, so on 2026-08-25 **both copies reported
+  the same start**, 64 s after the Hevy start.
+- The **end** is the one timing signal that separates them — we build the FIT
+  from the Hevy start and duration, so our copy lands on the Hevy end (0 s on
+  2026-08-25 and 2026-08-05, -8 s on 2026-08-20) while the watch recording runs
+  past it (+16 s on 2026-08-25). A 16 s margin is too thin to bet a write on.
 
-Hence the report-only observation below, and the safety rule any future write
-must keep: **only ever mute a stale copy in a window where our own copy is
-confirmed present.** On the recent syncs it is not, so a naive time-window fix
-would hide the only representation of that workout on Strava.
+So the observation below identifies the stale copy by **provenance, not
+timing**: whatever is already in the window when the watch copy is deleted from
+Garmin predates our upload and therefore cannot be ours. The end delta is kept
+as corroboration and as the fallback when that baseline could not be taken.
+
+The safety rule any future write must keep: **only ever mute a stale copy in a
+window where our own copy is confirmed present.**
 """
 
 from __future__ import annotations
@@ -227,14 +235,18 @@ _OBSERVE_WINDOW_HOURS = 3.0
 # Strava sport types that a Hevy strength workout can plausibly land as.
 _STRENGTH_TYPES = {"WeightTraining", "Workout", "Crossfit", "HighIntensityIntervalTraining"}
 
-# How close a Strava activity must sit to the Hevy workout to be read as our own
-# upload. hevy2garmin builds the FIT from the Hevy start and duration, so its
-# copy matches to the second — the one confirmed instance (2026-05-02) was 0/0.
-# Watch recordings of the same session came no closer than +39s/-39s, so the
-# window has to stay tight: a loose one relabels the watch copy as ours and
-# would later justify muting the only copy on Strava. Deltas are stored raw, so
-# this can be re-tuned once the observations are in.
-_OURS_TOLERANCE_S = 5
+# Corroborating signal only — provenance below is what actually decides.
+#
+# Strava reports ``start_date`` as the first *record* timestamp, not the FIT
+# session start, and HR fusion gives our upload the watch's HR samples — so both
+# copies of one session report the **same** start (2026-08-25: both 15:59:58Z,
+# 64 s after the Hevy start). Start time therefore cannot separate them.
+#
+# The end can: we build the FIT from the Hevy start and duration, so our copy
+# ends exactly at the Hevy end (0 s on 2026-08-25 and 2026-08-05, -8 s on
+# 2026-08-20), while the watch recording runs past it (+16 s on 2026-08-25).
+# That margin is thin, which is why it never decides on its own.
+_OURS_END_TOLERANCE_S = 10
 
 
 def _utcnow_iso() -> str:
@@ -249,22 +261,43 @@ def _parse_iso(value: object) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
-def _classify(entry: dict) -> str:
-    """Provisional label for one Strava activity, from measured fields only."""
+def _classify(entry: dict, baseline_ids: set | None) -> str:
+    """Label one Strava activity. Provenance decides; timing only corroborates.
+
+    ``baseline_ids`` is what the window held at the moment we deleted the watch
+    copy from Garmin — before our replacement existed anywhere, so before Garmin
+    could have pushed it. Anything in that set therefore *cannot* be ours, no
+    matter how its timings look, and anything that shows up later is ours unless
+    it arrived by some other route. That is the whole point of snapshotting at
+    delete time, and it is the only identification here that is not a heuristic.
+    """
     if entry.get("manual") or (entry.get("device_name") or "") == "Hevy":
         return "hevy_direct"
     # Our copy reaches Strava through Garmin's push like any other, so the
     # external_id shape is a precondition, not a discriminator — it only rules
     # out anything that arrived by some other route.
     if not str(entry.get("external_id") or "").startswith("garmin_ping_"):
+        return "unknown"
+
+    end_aligned = (
+        entry.get("delta_end_s") is not None
+        and abs(entry["delta_end_s"]) <= _OURS_END_TOLERANCE_S
+    )
+    if baseline_ids is None:
+        # No usable baseline (the delete-time fetch failed). Fall back to the
+        # weak signal and say so, rather than pretending to know.
+        return "ours?" if end_aligned else "stale?"
+    if entry.get("id") in baseline_ids:
         return "stale"
-    ds, de = entry.get("delta_start_s"), entry.get("delta_elapsed_s")
-    if ds is not None and de is not None and abs(ds) <= _OURS_TOLERANCE_S and abs(de) <= _OURS_TOLERANCE_S:
-        return "ours"
-    return "stale"
+    return "ours" if end_aligned else "unknown"
 
 
-def _summarize(act: dict, hevy_start: datetime | None, hevy_duration_s: int | None) -> dict:
+def _summarize(
+    act: dict,
+    hevy_start: datetime | None,
+    hevy_duration_s: int | None,
+    baseline_ids: set | None,
+) -> dict:
     start = _parse_iso(act.get("start_date"))
     elapsed = act.get("elapsed_time")
     entry = {
@@ -282,7 +315,14 @@ def _summarize(act: dict, hevy_start: datetime | None, hevy_duration_s: int | No
         "delta_start_s": int((start - hevy_start).total_seconds()) if start and hevy_start else None,
         "delta_elapsed_s": (int(elapsed) - hevy_duration_s) if isinstance(elapsed, int) and hevy_duration_s else None,
     }
-    entry["verdict"] = _classify(entry)
+    # Where the activity *ends* relative to the Hevy workout. Unlike the start,
+    # which HR fusion makes identical for both copies, this separates them.
+    if start and hevy_start and hevy_duration_s and isinstance(elapsed, int):
+        hevy_end = hevy_start + timedelta(seconds=hevy_duration_s)
+        entry["delta_end_s"] = int((start + timedelta(seconds=elapsed) - hevy_end).total_seconds())
+    else:
+        entry["delta_end_s"] = None
+    entry["verdict"] = _classify(entry, baseline_ids)
     return entry
 
 
@@ -341,8 +381,19 @@ def _snapshot(record: dict, headers: dict, base_url: str, phase: str) -> bool:
     if raw is None:
         return False
 
+    # Everything present when the watch copy was deleted predates our upload and
+    # so cannot be ours. Only that moment can establish it: a baseline taken on
+    # any later pass may already contain our own replacement, which would make
+    # it worse than no baseline at all. So if the delete-time fetch failed, the
+    # record stays baseline-less for good and falls back to the weak signal.
+    if "baseline_ids" not in record:
+        record["baseline_ids"] = [a.get("id") for a in raw] if phase == "watch_copy_deleted" else None
+        record["baseline_at"] = _utcnow_iso() if phase == "watch_copy_deleted" else None
+    baseline = record.get("baseline_ids")
+    baseline_ids = set(baseline) if isinstance(baseline, list) else None
+
     entries = sorted(
-        (_summarize(a, hevy_start, record.get("hevy_duration_s")) for a in raw),
+        (_summarize(a, hevy_start, record.get("hevy_duration_s"), baseline_ids) for a in raw),
         key=lambda e: str(e.get("start_date")),
     )
     snapshots = record.setdefault("snapshots", [])
@@ -362,17 +413,20 @@ def _snapshot(record: dict, headers: dict, base_url: str, phase: str) -> bool:
     ours, stale = verdicts.count("ours"), verdicts.count("stale")
     record["ours_present"] = ours > 0
     record["stale_count"] = stale
+    record["basis"] = "baseline" if baseline_ids is not None else "time_only"
     logger.info(
-        "  Strava observe [%s] hevy=%s: %d strength activit(y/ies) in window — ours=%d stale=%d hevy_direct=%d",
-        phase, record.get("hevy_id"), len(entries), ours, stale, verdicts.count("hevy_direct"),
+        "  Strava observe [%s, %s] hevy=%s: %d strength activit(y/ies) in window — "
+        "ours=%d stale=%d hevy_direct=%d unknown=%d",
+        phase, record["basis"], record.get("hevy_id"), len(entries), ours, stale,
+        verdicts.count("hevy_direct"), verdicts.count("unknown"),
     )
     for e in entries:
         logger.info(
-            "    %-11s id=%s start=%s (%+ds) elapsed=%ss (%+ds) name=%r external_id=%r "
-            "upload_id=%s manual=%s device=%r hidden=%s",
+            "    %-11s id=%s start=%s (%+ds) elapsed=%ss (%+ds) end(%+ds) name=%r "
+            "external_id=%r upload_id=%s manual=%s device=%r hidden=%s",
             e["verdict"], e["id"], e["start_date"], e["delta_start_s"] or 0, e["elapsed_time"],
-            e["delta_elapsed_s"] or 0, e["name"], e["external_id"], e["upload_id"],
-            e["manual"], e["device_name"], e["hide_from_home"],
+            e["delta_elapsed_s"] or 0, e["delta_end_s"] or 0, e["name"], e["external_id"],
+            e["upload_id"], e["manual"], e["device_name"], e["hide_from_home"],
         )
     if ours and stale:
         logger.warning(
@@ -477,6 +531,10 @@ def format_observations() -> str:
     records = _load_records()
     if not records:
         return "No Strava observations recorded yet."
+
+    def delta(value: object) -> str:
+        return f"{value:+}s" if isinstance(value, int) else "?"
+
     lines = []
     for r in records:
         lines.append(
@@ -486,18 +544,19 @@ def format_observations() -> str:
         )
         lines.append(
             f"    opened={r.get('opened_at')} checks={r.get('checks')} "
-            f"last={r.get('last_checked_at')} closed={r.get('closed')} "
+            f"last={r.get('last_checked_at')} basis={r.get('basis')} "
+            f"baseline={r.get('baseline_ids')} closed={r.get('closed')} "
             f"{r.get('closed_reason') or ''}"
         )
         for snap in r.get("snapshots") or []:
             lines.append(f"    --- {snap.get('at')} [{snap.get('phase')}]")
             for e in snap.get("activities") or []:
                 lines.append(
-                    f"        {e.get('verdict'):<11} id={e.get('id')} start={e.get('start_date')} "
-                    f"({e.get('delta_start_s')}s) elapsed={e.get('elapsed_time')}s "
-                    f"({e.get('delta_elapsed_s')}s) name={e.get('name')!r} "
-                    f"external_id={e.get('external_id')!r} upload_id={e.get('upload_id')} "
-                    f"manual={e.get('manual')} device={e.get('device_name')!r} "
-                    f"hidden={e.get('hide_from_home')}"
+                    f"        {str(e.get('verdict')):<11} id={e.get('id')} "
+                    f"start={e.get('start_date')} (start{delta(e.get('delta_start_s'))} "
+                    f"end{delta(e.get('delta_end_s'))}) elapsed={e.get('elapsed_time')}s "
+                    f"name={e.get('name')!r} external_id={e.get('external_id')!r} "
+                    f"upload_id={e.get('upload_id')} manual={e.get('manual')} "
+                    f"device={e.get('device_name')!r} hidden={e.get('hide_from_home')}"
                 )
     return "\n".join(lines)
