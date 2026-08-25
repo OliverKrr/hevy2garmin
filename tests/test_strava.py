@@ -344,3 +344,20 @@ def test_format_observations_renders_a_timeline(strava_env, store):
 
 def test_format_observations_with_no_records(store):
     assert "No Strava observations" in format_observations()
+
+
+def test_baseline_is_recovered_from_a_pre_existing_delete_time_snapshot(strava_env, store):
+    """Records written before baseline tracking still hold the same observation."""
+    _observe([_act()], store)
+    record = store.data["strava_observations"]["records"][0]
+    del record["baseline_ids"], record["baseline_at"]  # shape from the older version
+    store.set_app_config("strava_observations", {"records": [record]})
+
+    tok, get = _window([_act(), _OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["baseline_ids"] == [_act()["id"]]
+    assert record["basis"] == "baseline"
+    verdicts = {a["id"]: a["verdict"] for a in record["snapshots"][-1]["activities"]}
+    assert verdicts == {_act()["id"]: "stale", _OURS["id"]: "ours"}

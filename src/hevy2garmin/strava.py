@@ -387,8 +387,19 @@ def _snapshot(record: dict, headers: dict, base_url: str, phase: str) -> bool:
     # it worse than no baseline at all. So if the delete-time fetch failed, the
     # record stays baseline-less for good and falls back to the weak signal.
     if "baseline_ids" not in record:
-        record["baseline_ids"] = [a.get("id") for a in raw] if phase == "watch_copy_deleted" else None
-        record["baseline_at"] = _utcnow_iso() if phase == "watch_copy_deleted" else None
+        if phase == "watch_copy_deleted":
+            record["baseline_ids"] = [a.get("id") for a in raw]
+            record["baseline_at"] = _utcnow_iso()
+        else:
+            # A record written before the baseline was tracked still carries the
+            # delete-time snapshot, which is the same observation in an older
+            # shape — recover it from there rather than throwing it away.
+            prior = next(
+                (s for s in record.get("snapshots") or [] if s.get("phase") == "watch_copy_deleted"),
+                None,
+            )
+            record["baseline_ids"] = [a.get("id") for a in prior["activities"]] if prior else None
+            record["baseline_at"] = prior.get("at") if prior else None
     baseline = record.get("baseline_ids")
     baseline_ids = set(baseline) if isinstance(baseline, list) else None
 
