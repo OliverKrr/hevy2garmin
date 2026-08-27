@@ -151,6 +151,24 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
                     from hevy2garmin.intervals_icu import try_delete_icu_activity
 
                     try_delete_icu_activity(int(watch_id), workout_start)
+
+                    # Strava already pulled the watch copy from Garmin and
+                    # deletions don't propagate, so it lingers there. It cannot
+                    # be cleaned up yet: our replacement has not been pushed to
+                    # Strava, and muting the only copy would hide the workout.
+                    # Record the window instead — everything in it right now
+                    # predates our upload, which is what later identifies the
+                    # stale copy. Read-only; the write, if enabled, happens in
+                    # strava.recheck_observations once our copy has arrived.
+                    from hevy2garmin.strava import observe_window
+
+                    observe_window(
+                        hevy_id=wid,
+                        workout_start=workout_start,
+                        workout_end=(payload.get("workout") or {}).get("end_time", ""),
+                        watch_activity_id=watch_id,
+                        replacement_activity_id=activity_id,
+                    )
                 step = "commit"
                 store.update_pending(wid, next_step=step, last_error=None)
         _complete(store, wid, payload, activity_id)

@@ -2406,6 +2406,19 @@ async def _sync_one_recorded(
     finally:
         syncstate.release_sync_lock()
 
+    # Revisit any open Strava observation. This has to hang off the single-sync
+    # path as well as autosync.run_once: on Vercel the daily cron calls
+    # /api/cron/sync and the Hevy webhook lands here too, and neither goes
+    # through the auto-sync loop — so an observation opened there would take its
+    # delete-time snapshot and never be looked at again. Costs nothing when no
+    # record is open (it returns before authenticating) and never raises.
+    from hevy2garmin.strava import recheck_observations
+
+    try:
+        await run_in_threadpool(recheck_observations)
+    except Exception:
+        logger.debug("Strava observation recheck failed", exc_info=True)
+
     try:
         data = _json.loads(bytes(resp.body))
         # `failed` is what _do_sync_one reports for a non-synced outcome
