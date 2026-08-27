@@ -76,6 +76,15 @@ def run_once() -> int | None:
 
     syncstate.mark_synced()
     syncstate.record_sync_log(result, trigger="auto")
+
+    # Our Strava replacement arrives via Garmin's push, which lags the sync by an
+    # unknown amount, so the observation opened at delete time has to be
+    # revisited on a schedule to see what turned up. Already off the event loop
+    # (the caller runs this in a threadpool); no-ops without credentials or open
+    # records, and never raises.
+    from hevy2garmin.strava import recheck_observations
+
+    recheck_observations()
     return interval
 
 
