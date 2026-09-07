@@ -307,6 +307,132 @@ def test_baseline_is_recovered_from_a_pre_existing_delete_time_snapshot(strava_e
 
 
 # ---------------------------------------------------------------------------
+# The 2026-09-07 pair: identical timings, provenance the only signal left
+# ---------------------------------------------------------------------------
+#
+# The watch stopped 32 s before the Hevy workout closed, so our copy had no
+# overhang to be clipped to the Hevy end and both copies reported the same
+# start *and* the same end, 14 s early. The window holds no timing difference
+# at all — and an abs() test on the end delta then rejected our own copy, which
+# left ours_present false, so the record never confirmed and mute never fired.
+
+HEVY_START_0907 = "2026-09-07T16:21:21+00:00"
+HEVY_END_0907 = "2026-09-07T17:12:03+00:00"
+
+
+def _act_0907(**over):
+    """The real 2026-09-07 watch copy, as Strava reported it."""
+    base = {
+        "id": 20076893010,
+        "start_date": "2026-09-07T16:21:39Z",
+        "elapsed_time": 3010,
+        "moving_time": 3010,
+        "sport_type": "WeightTraining",
+        "name": "Evening Weight Training",
+        "external_id": "garmin_ping_625193877554",
+        "upload_id": 21221092526,
+        "manual": False,
+        "device_name": "Garmin Enduro 3",
+        "hide_from_home": False,
+    }
+    base.update(over)
+    return base
+
+
+# Our replacement that day. Garmin confirms activity 24274426651 spans the Hevy
+# window exactly (start 16:21:21, duration 3042 s); Strava reports it from the
+# first and last fused HR record instead, which are the watch's — hence timings
+# indistinguishable from the copy it replaces.
+_OURS_0907 = _act_0907(id=20077379357, external_id="garmin_ping_625204840830",
+                       upload_id=21221598875, device_name=None)
+
+
+def _observe_0907(activities, store):
+    tok, get = _window(activities)
+    with tok, get:
+        observe_window(hevy_id="w0907", workout_start=HEVY_START_0907,
+                       workout_end=HEVY_END_0907, watch_activity_id=24273963621,
+                       replacement_activity_id=24274426651)
+    return store.data.get("strava_observations", {}).get("records", [])
+
+
+def test_identical_timings_still_identify_our_copy_by_provenance(strava_env, store):
+    _observe_0907([_act_0907()], store)
+    tok, get = _window([_act_0907(), _OURS_0907])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    entries = {a["id"]: a for a in _entries(record)}
+    # Both copies: same start, same end, 14 s before the Hevy end.
+    assert {(e["delta_start_s"], e["delta_end_s"]) for e in entries.values()} == {(18, -14)}
+    assert entries[_act_0907()["id"]]["verdict"] == "stale"
+    assert entries[_OURS_0907["id"]]["verdict"] == "ours"
+    assert record["ours_present"] is True and record["stale_count"] == 1
+    assert record["closed_reason"] == "duplicate_confirmed"
+
+
+def test_an_earlier_recording_is_not_claimed_as_ours(strava_env, store):
+    """Our FIT opens at the Hevy start, so nothing earlier can be our copy.
+
+    The span bound is one-sided but it is a bound at both ends: an end before
+    the Hevy end is normal for us, a start before the Hevy start is not.
+    """
+    _observe([_act()], store)
+    earlier = _act(id=8, start_date="2026-08-25T15:30:00Z", elapsed_time=2000,
+                   name="Warm-up", device_name=None)
+    tok, get = _window([_act(), earlier])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
+    assert verdicts[8] == "unknown"
+    assert record["ours_present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Closing a record
+# ---------------------------------------------------------------------------
+
+
+def test_an_abandoned_record_ages_out_and_stops_polling(strava_env, store):
+    """The age test used to gate the visit list, so this branch was unreachable."""
+    _observe([_act()], store)
+    record = store.data["strava_observations"]["records"][0]
+    record["opened_at"] = "2026-01-01T00:00:00+00:00"
+    store.set_app_config("strava_observations", {"records": [record]})
+    with patch("hevy2garmin.strava._session") as session:
+        recheck_observations()
+        session.assert_not_called()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["closed"] is True
+    assert record["closed_reason"] == "aged_out"
+
+
+def test_a_record_closes_when_the_stale_copy_was_deleted_by_hand(strava_env, store):
+    """Our copy present and the whole baseline gone: nothing left to watch."""
+    _observe([_act()], store)
+    tok, get = _window([_OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert (record["ours_present"], record["stale_count"]) == (True, 0)
+    assert record["closed"] is True
+    assert record["closed_reason"] == "stale_copy_gone"
+
+
+def test_an_empty_baseline_keeps_the_record_open(strava_env, store):
+    """Garmin had not pushed the watch copy yet, so a stale one can still land."""
+    _observe([], store)
+    tok, get = _window([_OURS])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    assert record["baseline_ids"] == []
+    assert record["ours_present"] is True
+    assert record["closed"] is False
+
+
+# ---------------------------------------------------------------------------
 # STRAVA_CLEANUP_MODE
 # ---------------------------------------------------------------------------
 
@@ -365,6 +491,24 @@ def test_mute_writes_only_to_the_stale_copy(strava_env, store, monkeypatch):
     assert record["cleanup"] == [{"id": _act()["id"], "at": ANY, "muted": True}]
     assert record["closed_reason"] == "duplicate_cleaned"
     assert record["snapshots"][-1]["phase"] == "after_mute"
+
+
+def test_mute_fires_on_the_identical_timing_pair(strava_env, store, monkeypatch):
+    """End to end on the 2026-09-07 window, the one this would have missed."""
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    _observe_0907([_act_0907()], store)
+    muted = _act_0907(name=f"{DUP_PREFIX}Evening Weight Training", hide_from_home=True)
+    tok = patch("hevy2garmin.strava._get_access_token", return_value="tok")
+    get = patch("hevy2garmin.strava.requests.get",
+                side_effect=[_resp([_act_0907(), _OURS_0907]), _resp([muted, _OURS_0907])])
+    with tok, get, patch("hevy2garmin.strava.requests.put", return_value=_resp({})) as put:
+        recheck_observations()
+    assert put.call_count == 1
+    url, kwargs = put.call_args[0][0], put.call_args[1]
+    assert str(_act_0907()["id"]) in url and str(_OURS_0907["id"]) not in url
+    assert kwargs["json"] == {"hide_from_home": True, "name": f"{DUP_PREFIX}Evening Weight Training"}
+    record = store.data["strava_observations"]["records"][0]
+    assert record["closed_reason"] == "duplicate_cleaned"
 
 
 def test_mute_never_fires_while_our_copy_is_absent(strava_env, store, monkeypatch):
