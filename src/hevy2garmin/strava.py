@@ -31,10 +31,9 @@ up, and only then, and only in ``mute`` mode, does it write.
 
 That ordering is the safety property: **a stale copy is only ever muted in a
 window where our own copy is confirmed present**, so the workout always keeps a
-visible representation on Strava. The end delta (our copy lands exactly on the
-Hevy end, a watch recording runs past it) is recorded as corroboration and is
-the fallback when the baseline could not be taken, but never decides a write on
-its own.
+visible representation on Strava. The timings are recorded too, but they only
+ever rule an activity *out* of being ours — see ``_SPAN_TOLERANCE_S`` for why
+they cannot rule one in.
 
 Runs only when STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET and STRAVA_REFRESH_TOKEN
 are set, and writes only when STRAVA_CLEANUP_MODE=mute. Strava rotates refresh
@@ -51,8 +50,12 @@ first observed pair on 2026-08-25):
   deleted the watch copy from Garmin and two an hour later, the second pushed by
   Garmin from our own replacement. 2026-05-02 holds three copies of one session,
   the extra one posted by Hevy's own Strava integration.
-- It does not happen every time. Between 2026-07-17 and 2026-08-20 the window
-  held a single activity on every sync.
+- It happens **every time**, and it does not heal itself. Every replace-merge
+  observed since (2026-08-31, 09-02, 09-07) found exactly one stale copy in the
+  delete-time baseline. The earlier read-only sweep over 2026-07-17 to 08-20
+  saw a single activity per session only because the athlete had already
+  deleted the duplicates by hand; the three observed stale copies went 404 the
+  same way. Garmin's deletion never propagated to any of them.
 - ``device_name`` does not decide it. On 2026-08-25 the watch copy reported
   ``Garmin Enduro 3`` and ours ``None``, but merge-era activities — definitely
   watch recordings, since merge neither uploads nor deletes — report ``None``
@@ -61,15 +64,19 @@ first observed pair on 2026-08-25):
   the first *record* timestamp rather than the FIT session start, and HR fusion
   gives our upload the watch's samples, so on 2026-08-25 **both copies reported
   the same start**, 64 s after the Hevy start.
-- The **end** is the one timing signal that separates them — we build the FIT
-  from the Hevy start and duration, so our copy lands on the Hevy end (0 s on
-  2026-08-25 and 2026-08-05, -8 s on 2026-08-20) while the watch recording runs
-  past it (+16 s on 2026-08-25). A 16 s margin is too thin to bet a write on.
+- The **end** does not decide it, though for three sessions it looked like it
+  might. Strava takes the end from the last record too, so our copy ends at
+  ``min(watch_end, hevy_end)``: when the watch ran past the Hevy end ours was
+  clipped to it (0 s on 2026-08-25 and 2026-08-05, -8 s on 2026-08-20) and the
+  watch copy kept its overhang (+16 s on 2026-08-25), but when the watch stops
+  early both copies land on the same end — 2026-09-07, watch stopped 32 s
+  early, **both copies -14 s**. The end measures the watch, not the copy.
 
 So the observation below identifies the stale copy by **provenance, not
 timing**: whatever is already in the window when the watch copy is deleted from
-Garmin predates our upload and therefore cannot be ours. The end delta is kept
-as corroboration and as the fallback when that baseline could not be taken.
+Garmin predates our upload and therefore cannot be ours. The timings are kept
+to rule out unrelated recordings and as the (weak, never-writing) fallback when
+that baseline could not be taken.
 
 The safety rule any future write must keep: **only ever mute a stale copy in a
 window where our own copy is confirmed present.**
@@ -185,18 +192,26 @@ _OBSERVE_WINDOW_HOURS = 3.0
 # Strava sport types that a Hevy strength workout can plausibly land as.
 _STRENGTH_TYPES = {"WeightTraining", "Workout", "Crossfit", "HighIntensityIntervalTraining"}
 
-# Corroborating signal only — provenance below is what actually decides.
+# A sanity bound on the shape of our own copy, not a discriminator — provenance
+# below is what actually decides.
 #
-# Strava reports ``start_date`` as the first *record* timestamp, not the FIT
-# session start, and HR fusion gives our upload the watch's HR samples — so both
-# copies of one session report the **same** start (2026-08-25: both 15:59:58Z,
-# 64 s after the Hevy start). Start time therefore cannot separate them.
+# Strava reports ``start_date`` and ``elapsed_time`` from the first and last
+# *record*, not from the FIT session bounds, and HR fusion gives our upload the
+# watch's samples clipped to our session. So our copy's Strava span is always
+# *contained* in the Hevy window: it starts at or after the Hevy start (both
+# copies reported 15:59:58Z on 2026-08-25, 64 s in) and ends at
+# ``min(watch_end, hevy_end)``, never meaningfully later.
 #
-# The end can: we build the FIT from the Hevy start and duration, so our copy
-# ends exactly at the Hevy end (0 s on 2026-08-25 and 2026-08-05, -8 s on
-# 2026-08-20), while the watch recording runs past it (+16 s on 2026-08-25).
-# That margin is thin, which is why it never decides on its own.
-_OURS_END_TOLERANCE_S = 10
+# Which way the end falls therefore depends on the watch, not on which copy it
+# is. When the watch ran past the Hevy end our copy was clipped to it (0 s on
+# 2026-08-25 and 2026-08-05, -8 s on 2026-08-20) while the watch copy kept its
+# overhang (+16 s on 2026-08-25). When the watch stopped early there is nothing
+# to clip and both copies report the same end: on 2026-09-07 the watch stopped
+# 32 s before the Hevy workout closed and both landed on -14 s. An ``abs()``
+# test on the end delta therefore rejected our own copy that day, which is why
+# the bound below is one-sided: it can rule an activity *out* of being ours, and
+# never in.
+_SPAN_TOLERANCE_S = 10
 
 
 def _utcnow_iso() -> str:
@@ -217,7 +232,7 @@ def _delta(value: object) -> str:
 
 
 def _classify(entry: dict, baseline_ids: set | None) -> str:
-    """Label one Strava activity. Provenance decides; timing only corroborates.
+    """Label one Strava activity. Provenance decides; timing only rules out.
 
     ``baseline_ids`` is what the window held at the moment we deleted the watch
     copy from Garmin — before our replacement existed anywhere, so before Garmin
@@ -225,6 +240,11 @@ def _classify(entry: dict, baseline_ids: set | None) -> str:
     matter how its timings look, and anything that shows up later is ours unless
     it arrived by some other route. That is the whole point of snapshotting at
     delete time, and it is the only identification here that is not a heuristic.
+
+    Timing's only job is to catch that other route: a late arrival whose span
+    does not fit inside the Hevy window is a different recording, not our
+    replacement. It must never be asked to confirm a copy *is* ours, because on
+    2026-09-07 both copies of one session reported identical timings.
     """
     if entry.get("manual") or (entry.get("device_name") or "") == "Hevy":
         return "hevy_direct"
@@ -234,17 +254,24 @@ def _classify(entry: dict, baseline_ids: set | None) -> str:
     if not str(entry.get("external_id") or "").startswith("garmin_ping_"):
         return "unknown"
 
-    end_aligned = (
-        entry.get("delta_end_s") is not None
-        and abs(entry["delta_end_s"]) <= _OURS_END_TOLERANCE_S
+    # Our copy's span sits inside the Hevy window (see _SPAN_TOLERANCE_S): it
+    # cannot start before the Hevy start, and it cannot end after the Hevy end.
+    # Anything outside that is some other recording, whichever way it leans.
+    delta_start, delta_end = entry.get("delta_start_s"), entry.get("delta_end_s")
+    within_hevy_span = (
+        delta_start is not None
+        and delta_end is not None
+        and delta_start >= -_SPAN_TOLERANCE_S
+        and delta_end <= _SPAN_TOLERANCE_S
     )
     if baseline_ids is None:
         # No usable baseline (the delete-time fetch failed). Fall back to the
-        # weak signal and say so, rather than pretending to know.
-        return "ours?" if end_aligned else "stale?"
+        # weak signal and say so, rather than pretending to know. Neither of
+        # these verdicts can drive a write.
+        return "ours?" if within_hevy_span else "stale?"
     if entry.get("id") in baseline_ids:
         return "stale"
-    return "ours" if end_aligned else "unknown"
+    return "ours" if within_hevy_span else "unknown"
 
 
 def _summarize(act: dict) -> dict:
@@ -463,6 +490,26 @@ def _clean_up(record: dict, headers: dict, base_url: str) -> list[dict]:
     return results
 
 
+def _baseline_cleared(record: dict) -> bool:
+    """True once every activity the baseline held has left the window.
+
+    Someone deleting the stale copy by hand before our own copy arrives is the
+    other way a duplicate resolves, and it leaves a record with nothing left to
+    watch — which would otherwise keep polling Strava for the full
+    ``_OBSERVE_DAYS`` and keep reporting itself as open.
+
+    An empty baseline does not count: if Garmin had not yet pushed the watch
+    copy when we snapshotted, a stale copy can still arrive *after* ours, so
+    that record has to stay open.
+    """
+    baseline = record.get("baseline_ids")
+    snapshots = record.get("snapshots") or []
+    if not isinstance(baseline, list) or not baseline or not snapshots:
+        return False
+    present = {a.get("id") for a in snapshots[-1].get("activities") or []}
+    return not (set(baseline) & present)
+
+
 def _session() -> tuple[dict, str] | None:
     client_id = os.environ.get("STRAVA_CLIENT_ID", "")
     client_secret = os.environ.get("STRAVA_CLIENT_SECRET", "")
@@ -531,18 +578,29 @@ def recheck_observations() -> None:
         if mode == "off":
             return
         records = _load_records()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_OBSERVE_DAYS)
-        open_records = [
-            r for r in records
-            if not r.get("closed") and (_parse_iso(r.get("opened_at")) or cutoff) > cutoff
-        ]
+        open_records = [r for r in records if not r.get("closed")]
         if not open_records:
             return
-        session = _session()
+        # Age out *before* polling. The age test used to also gate the list of
+        # records to visit, which meant the branch that was supposed to close an
+        # aged record could never be reached: the record simply stopped being
+        # rechecked while still reporting itself open, for good.
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_OBSERVE_DAYS)
+        live, aged = [], 0
+        for record in open_records:
+            if (_parse_iso(record.get("opened_at")) or cutoff) <= cutoff:
+                record["closed"] = True
+                record["closed_reason"] = "aged_out"
+                aged += 1
+            else:
+                live.append(record)
+        session = _session() if live else None
         if session is None:
+            if aged:
+                _save_records(records)
             return
         headers, base_url = session
-        for record in open_records:
+        for record in live:
             _snapshot(record, headers, base_url, phase="recheck")
             # Our copy and a stale one seen together is the whole point of
             # watching: it is the only state in which a write is safe, because
@@ -555,9 +613,9 @@ def recheck_observations() -> None:
                     _snapshot(record, headers, base_url, phase="after_mute")
                 record["closed"] = True
                 record["closed_reason"] = "duplicate_cleaned" if mode == "mute" else "duplicate_confirmed"
-            elif (_parse_iso(record.get("opened_at")) or cutoff) <= cutoff:
+            elif record.get("ours_present") and _baseline_cleared(record):
                 record["closed"] = True
-                record["closed_reason"] = "aged_out"
+                record["closed_reason"] = "stale_copy_gone"
         _save_records(records)
     except Exception:
         logger.debug("Strava observe: recheck failed", exc_info=True)
