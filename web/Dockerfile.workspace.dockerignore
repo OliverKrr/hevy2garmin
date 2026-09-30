@@ -1,0 +1,13 @@
+# Context is the repository root; only typescript/ and web/ are used.
+*
+!typescript/package.json
+!typescript/package-lock.json
+!typescript/tsconfig.json
+!typescript/src
+!web
+web/node_modules
+web/.next
+web/.env*
+!web/.env.example
+web/test-results
+web/playwright-report
