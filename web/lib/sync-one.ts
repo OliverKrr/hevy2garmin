@@ -44,6 +44,13 @@ export type {
 export { generateDescription } from "hevy2garmin";
 
 export interface SyncOneOptions extends EngineSyncOneOptions {
+  /**
+   * The engine's merge-only mode. Declared here as well so this app builds
+   * against a pinned engine that predates it; such an engine ignores the flag,
+   * and the webhook, its only caller, stays safe with that (see its route).
+   * Drop this line once the pin reaches the release that has it.
+   */
+  mergeOnly?: boolean;
   /** Test seam: replace the Hevy fetch. Default: fetchAllWorkouts(). */
   fetchWorkouts?: () => Promise<HevyWorkout[]>;
   /** Test seam: replace the Garmin client. Default: getGarminClient(). */

@@ -6,7 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The Hevy webhook on a self-hosted `web/` server syncs merge-first again, as the Python server did. It answers at once, waits 5 minutes, tries up to twice more 10 minutes apart to merge into the watch activity, and uploads a fresh activity only on the last attempt. `WEBHOOK_DELAY_SECONDS`, `WEBHOOK_RETRY_INTERVAL_SECONDS`, `WEBHOOK_MAX_ATTEMPTS` and `WEBHOOK_MAX_INFLIGHT` keep their Python names and defaults. Vercel and the GitHub Actions handoff are unchanged (#N).
+- Engine: `syncOneWorkout` takes `mergeOnly`, and returns `merge_pending` when the merge found no Garmin activity instead of uploading. A `replace` match counts as found. The Python `merge_only` also refused those, so with `watch_strategy=replace` every webhook sync waited for the last attempt (#N).
+
 ### Fixed
+
+- The webhook compares the `CRON_SECRET` bearer in constant time (#N).
 
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
 - The Docker section of the README mounts both folders for `init`, recommends named volumes, explains uid 999 for host folders, and tells docker-compose users how to reuse their old volumes (#651, #652).

@@ -64,6 +64,11 @@ export interface MergeOptions extends MergeMatchOptions {
 export interface MergeOutcome {
   /** Did we act on a watch activity at all? */
   merged: boolean;
+  /**
+   * The matched Garmin activity. Set on every outcome that found one, merged
+   * or not, and unset only when no activity was found or none was looked for.
+   * `syncOneWorkout`'s merge-only mode relies on exactly that split.
+   */
   activityId?: number;
   strategy?: WatchStrategy;
   /** Set when merged is false, so the caller can log why it fell through. */
@@ -221,7 +226,12 @@ export async function mergeIntoWatchActivity(
   const startTime = act.startTimeGMT || act.startTimeLocal || "";
   const durationS = act.duration ?? 0;
   if (!startTime || durationS <= 0) {
-    return { merged: false, reason: "matched activity is missing a start time or duration" };
+    return {
+      merged: false,
+      activityId: act.activityId,
+      strategy,
+      reason: "matched activity is missing a start time or duration",
+    };
   }
 
   const payload = buildExerciseSetsPayload(
