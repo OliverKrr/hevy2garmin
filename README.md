@@ -313,11 +313,46 @@ cp .env.example .env.local   # DATABASE_URL, H2G_PASSWORD, HEVY2GARMIN_SECRET, C
 npm ci && npm run build && npm start   # http://localhost:8096
 ```
 
-Put it behind nginx, Caddy or Traefik on a subdomain, terminate TLS there, and keep the port bound to `127.0.0.1`. `DATABASE_URL` can point at a local Postgres instead of Neon; the schema is created on first start.
+Put it behind nginx, Caddy or Traefik on a subdomain, terminate TLS there, and keep the port bound to `127.0.0.1`. `DATABASE_URL` can point at a local Postgres instead of Neon; the app creates its tables the first time it touches the database.
+
+### Docker (dashboard)
+
+`web/Dockerfile` builds the dashboard as a container, and `web/docker-compose.example.yml` runs it with Postgres and a small scheduler for auto-sync. This is a different image from the CLI one in [Docker](#docker).
+
+```bash
+git clone https://github.com/drkostas/hevy2garmin.git
+cd hevy2garmin/web
+cp docker-compose.example.yml docker-compose.yml
+cat > .env <<'EOF'
+POSTGRES_PASSWORD=pick-a-database-password
+H2G_PASSWORD=pick-a-dashboard-password
+HEVY2GARMIN_SECRET=32-random-characters
+CRON_SECRET=another-32-random-characters
+EOF
+docker compose up -d --build   # http://127.0.0.1:8096
+```
+
+`openssl rand -hex 32` makes a good secret. Then open the dashboard and connect Hevy and Garmin on the setup page, the same as on Vercel.
+
+The compose file starts three containers:
+
+- `db`, Postgres 16, with its data in the `db_data` volume. It is the only state; the web container holds none.
+- `web`, the dashboard on port 8096, bound to `127.0.0.1`. It runs as the unprivileged `node` user, and its health check is `GET /api/version`, which needs neither a session nor the database.
+- `cron`, which calls `GET /api/cron/sync` every two hours (`SYNC_INTERVAL_SECONDS` in `.env` changes it). Without something calling that route, a self-hosted dashboard only syncs when you press **Sync Now** or Hevy sends a webhook.
+
+To run the image without compose, build it with `docker build -t hevy2garmin-web web/` and pass the same variables with `-e`, pointing `DATABASE_URL` at your Postgres. The image builds and runs on amd64 and arm64. Build it on the machine that runs it: an emulated cross-build under QEMU crashes in Next's build step. To have `/api/version` report the commit you built, set `HEVY2GARMIN_COMMIT_SHA` when you start the container.
 
 ### Keeping it in sync
 
-The web app syncs when you press **Sync Now**, on its cron route (`POST /api/cron/sync` with `CRON_SECRET`; Vercel calls it daily, a self-hosted box calls it from cron), and on a Hevy webhook (`POST /api/cron/webhook`, same secret). The CLI is the other option: `hevy2garmin sync` from cron, with credentials saved by `hevy2garmin init`.
+The web app syncs when you press **Sync Now**, on its cron route, and on a Hevy webhook (`POST /api/cron/webhook` with `Authorization: Bearer <CRON_SECRET>`). The CLI is the other option: `hevy2garmin sync` from cron, with credentials saved by `hevy2garmin init`.
+
+The cron route is `GET /api/cron/sync` with the same bearer. Vercel calls it daily; a self-hosted box needs a scheduler of its own. The compose file above has one. With plain cron it is this line, with your secret written in place of `$CRON_SECRET`, because cron does not read `.env`:
+
+```bash
+0 */2 * * * curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://127.0.0.1:8096/api/cron/sync
+```
+
+Leave `GITHUB_PAT` and `GITHUB_REPO` unset on a self-hosted box. With both set, the route hands the run to the GitHub Actions workflow on your fork instead of syncing on the server.
 
 ### Removing duplicates from intervals.icu
 
@@ -334,7 +369,7 @@ Entirely opt-in — with either one missing the step is skipped. It also never f
 
 ### Running as a non-root user
 
-The image runs as uid 999. Named volumes (what the compose file uses) are handled automatically. If you use **bind mounts** instead — the `-v ~/.hevy2garmin:/root/.hevy2garmin` form shown in the Docker section — grant that user access once:
+The CLI image runs as uid 999. Named volumes (what the [Docker](#docker) section recommends) are handled automatically. If you use **bind mounts** instead — the `-v ~/.hevy2garmin:/root/.hevy2garmin` form shown in the Docker section — grant that user access once:
 
 ```bash
 sudo chown -R 999:999 ~/.hevy2garmin ~/.garminconnect
@@ -376,6 +411,16 @@ docker build -t hevy2garmin .
 ```
 
 Coming from the docker-compose setup? Version 0.12.0 removed `docker-compose.yml` and the dashboard it ran. Your data is still in its two volumes, usually named `hevy2garmin_hevy2garmin_data` and `hevy2garmin_garmin_auth` (check with `docker volume ls`). Use those names in the `-v` options of the [Docker](#docker) commands above and you keep your Garmin login and your sync history.
+
+### Docker (dashboard)
+
+```bash
+cd hevy2garmin
+git pull origin main
+cd web && docker compose up -d --build
+```
+
+The database is in the `db_data` volume, so rebuilding the web container loses nothing.
 
 ### Git clone (local)
 

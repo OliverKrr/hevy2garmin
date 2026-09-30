@@ -1,0 +1,18 @@
+# The image installs from the lockfile and builds inside the container, so a
+# local node_modules or .next would only be overwritten, and .env files must
+# never be baked into an image.
+node_modules
+.next
+out
+build
+coverage
+test-results
+playwright-report
+blob-report
+.vercel
+.env*
+!.env.example
+*.tsbuildinfo
+next-env.d.ts
+Dockerfile
+docker-compose*.yml

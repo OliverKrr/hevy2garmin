@@ -1,0 +1,70 @@
+# Self-hosting the dashboard: Postgres, the web app, and a scheduler for auto-sync.
+#
+#   cd web
+#   cp docker-compose.example.yml docker-compose.yml
+#   # create .env next to it with POSTGRES_PASSWORD, H2G_PASSWORD,
+#   # HEVY2GARMIN_SECRET and CRON_SECRET (see the README, "Self-hosting")
+#   docker compose up -d --build
+#
+# The dashboard answers on http://127.0.0.1:8096. Put a reverse proxy with TLS
+# in front of it; the port is bound to localhost so it is not public by itself.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hevy2garmin
+      POSTGRES_USER: hevy2garmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hevy2garmin -d hevy2garmin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    image: hevy2garmin-web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8096:8096"
+    environment:
+      # The app creates its tables on first use; nothing to migrate by hand.
+      DATABASE_URL: postgres://hevy2garmin:${POSTGRES_PASSWORD}@db:5432/hevy2garmin
+      H2G_PASSWORD: ${H2G_PASSWORD:?set H2G_PASSWORD in .env}
+      HEVY2GARMIN_SECRET: ${HEVY2GARMIN_SECRET:?set HEVY2GARMIN_SECRET in .env}
+      CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET in .env}
+      # Optional ones from .env.example (INTERVALS_API_KEY, INTERVALS_ATHLETE_ID, ...)
+      # go here as well. Leave GITHUB_PAT and GITHUB_REPO unset: with both set,
+      # /api/cron/sync hands the run to GitHub Actions instead of syncing here.
+
+  # Auto-sync. The web app has no timer of its own; something has to call
+  # GET /api/cron/sync with the cron secret. Every 2 hours by default, which
+  # matches the default 120-minute grace period.
+  cron:
+    image: curlimages/curl:8.16.0
+    restart: unless-stopped
+    # Not `service_healthy`: the loop sleeps first, so the web app has long been
+    # up by the first call, and Podman drops HEALTHCHECK from OCI-format builds.
+    depends_on:
+      - web
+    environment:
+      CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET in .env}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-7200}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          sleep "$$SYNC_INTERVAL_SECONDS"
+          curl -sS --max-time 900 -w ' HTTP %{http_code}\n' \
+            -H "Authorization: Bearer $$CRON_SECRET" http://web:8096/api/cron/sync
+        done
+
+volumes:
+  db_data:
