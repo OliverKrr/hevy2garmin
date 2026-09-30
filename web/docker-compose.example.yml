@@ -26,7 +26,11 @@ services:
       retries: 5
 
   web:
-    build: .
+    build:
+      context: .
+      # Optional path prefix (README: Under a sub-path), baked in at build time.
+      args:
+        H2G_BASE_PATH: ${H2G_BASE_PATH:-}
     image: hevy2garmin-web
     restart: unless-stopped
     depends_on:
@@ -57,13 +61,14 @@ services:
     environment:
       CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET in .env}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-7200}
+      H2G_BASE_PATH: ${H2G_BASE_PATH:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         while true; do
           sleep "$$SYNC_INTERVAL_SECONDS"
           curl -sS --max-time 900 -w ' HTTP %{http_code}\n' \
-            -H "Authorization: Bearer $$CRON_SECRET" http://web:8096/api/cron/sync
+            -H "Authorization: Bearer $$CRON_SECRET" http://web:8096$${H2G_BASE_PATH}/api/cron/sync
         done
 
 volumes:

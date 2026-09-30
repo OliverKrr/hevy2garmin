@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 const INTERVALS = [30, 60, 120, 240, 360, 720, 1440];
 function fmtInterval(m: number): string {
@@ -25,7 +26,7 @@ export function AutoSyncToggle({ enabled, interval = 120 }: { enabled: boolean; 
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/toggle-autosync", {
+      const res = await fetch(withBasePath("/api/toggle-autosync"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !enabled }),
@@ -47,7 +48,7 @@ export function AutoSyncToggle({ enabled, interval = 120 }: { enabled: boolean; 
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withBasePath("/api/settings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ auto_sync: { interval_minutes: minutes } }),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * "Scan for duplicates" maintenance action for the settings page. Posts to
@@ -17,7 +18,7 @@ export function ScanDuplicates() {
     setError(null);
     setResult(null);
     try {
-      const res = await fetch("/api/scan-duplicates", { method: "POST" });
+      const res = await fetch(withBasePath("/api/scan-duplicates"), { method: "POST" });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; count?: number; error?: string };
       if (!res.ok || !d.ok) {
         setError(d.error ?? `Request failed (${res.status}).`);

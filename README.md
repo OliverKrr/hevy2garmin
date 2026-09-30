@@ -342,6 +342,12 @@ The compose file starts three containers:
 
 To run the image without compose, build it with `docker build -t hevy2garmin-web web/` and pass the same variables with `-e`, pointing `DATABASE_URL` at your Postgres. The image builds and runs on amd64 and arm64. Build it on the machine that runs it: an emulated cross-build under QEMU crashes in Next's build step. To have `/api/version` report the commit you built, set `HEVY2GARMIN_COMMIT_SHA` when you start the container.
 
+### Under a sub-path
+
+To serve the dashboard under a path such as `https://example.com/tools/hevy2garmin` instead of a subdomain, set `H2G_BASE_PATH=/tools/hevy2garmin` when you **build**: Next.js bakes the base path into the bundle, so `npm run build` (or the image) has to be made for the path it is served under. The proxy then forwards the full path, prefix included. Forward the app's root as the bare `/tools/hevy2garmin`, not `/tools/hevy2garmin/`: Next.js redirects the slashed form to the bare one, so a proxy that maps the bare form back to the slashed one loops.
+
+With Docker, put `H2G_BASE_PATH=/tools/hevy2garmin` in `.env` before `docker compose up -d --build`, or pass `--build-arg H2G_BASE_PATH=/tools/hevy2garmin` to `docker build`. The image's health check and the compose scheduler follow it.
+
 ### Keeping it in sync
 
 The web app syncs when you press **Sync Now**, on its cron route, and on a Hevy webhook (`POST /api/cron/webhook` with `Authorization: Bearer <CRON_SECRET>`). The CLI is the other option: `hevy2garmin sync` from cron, with credentials saved by `hevy2garmin init`.

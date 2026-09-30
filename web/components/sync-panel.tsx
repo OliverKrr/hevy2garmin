@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /** Mirrors the SyncOneResult shape returned by /api/sync-one. */
 interface SyncResult {
@@ -72,7 +73,7 @@ export function SyncPanel({ ready }: { ready: boolean }) {
     setBusy(live ? "live" : "preview");
     setError(null);
     try {
-      const res = await fetch(`/api/sync-one${live ? "?live=1" : ""}`, {
+      const res = await fetch(withBasePath(`/api/sync-one${live ? "?live=1" : ""}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(live ? { live: 1 } : {}),

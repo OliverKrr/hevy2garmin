@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 export interface WorkoutItem {
   hevy_id: string;
@@ -101,7 +102,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     if (next && samples === undefined) {
       setLoading(true);
       try {
-        const res = await fetch(`/api/workout/${encodeURIComponent(item.hevy_id)}/hr`);
+        const res = await fetch(withBasePath(`/api/workout/${encodeURIComponent(item.hevy_id)}/hr`));
         const d = (await res.json().catch(() => ({}))) as { samples?: unknown };
         setSamples(Array.isArray(d.samples) ? (d.samples as number[]) : null);
       } catch {
@@ -116,7 +117,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     setActing(true);
     setActionErr(null);
     try {
-      const res = await fetch(`/api/workout/${encodeURIComponent(item.hevy_id)}/${action}`, {
+      const res = await fetch(withBasePath(`/api/workout/${encodeURIComponent(item.hevy_id)}/${action}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "resolved from web" }),
@@ -141,7 +142,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     setActing(true);
     setActionErr(null);
     try {
-      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/abandon`, {
+      const res = await fetch(withBasePath(`/api/pending/${encodeURIComponent(item.hevy_id)}/abandon`), {
         method: "POST",
       });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
@@ -165,7 +166,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     setActionErr(null);
     setRecoveryMsg(null);
     try {
-      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/reconcile`, {
+      const res = await fetch(withBasePath(`/api/pending/${encodeURIComponent(item.hevy_id)}/reconcile`), {
         method: "POST",
       });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; status?: string; error?: string };
@@ -191,7 +192,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     setActionErr(null);
     setRecoveryMsg(null);
     try {
-      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/retry`, {
+      const res = await fetch(withBasePath(`/api/pending/${encodeURIComponent(item.hevy_id)}/retry`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: item.hevy_id }),
@@ -215,7 +216,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     setActing(true);
     setActionErr(null);
     try {
-      const res = await fetch(`/api/unsync/${encodeURIComponent(item.hevy_id)}`, {
+      const res = await fetch(withBasePath(`/api/unsync/${encodeURIComponent(item.hevy_id)}`), {
         method: "POST",
       });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };

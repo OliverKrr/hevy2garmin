@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface CategoryOption {
   id: number;
@@ -72,7 +73,7 @@ function MappingFields({
     }
     setBusy(true);
     try {
-      const res = await fetch("/api/mapping", {
+      const res = await fetch(withBasePath("/api/mapping"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -187,7 +188,7 @@ export function DeleteMappingButton({ hevyName }: { hevyName: string }) {
     if (!confirm(`Delete custom mapping for "${hevyName}"?`)) return;
     setBusy(true);
     try {
-      await fetch("/api/mapping/delete", {
+      await fetch(withBasePath("/api/mapping/delete"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hevy_name: hevyName }),

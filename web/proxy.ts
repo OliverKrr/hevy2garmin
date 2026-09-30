@@ -214,7 +214,7 @@ export async function proxy(req: NextRequest) {
   if (pathname === "/api/session-epoch") return NextResponse.next();
 
   const cookie = req.cookies.get(SESSION_COOKIE)?.value ?? null;
-  const epoch = await currentEpoch(req.nextUrl.origin);
+  const epoch = await currentEpoch(req.nextUrl.origin + req.nextUrl.basePath);
   const authed = await verifySession(cookie, epoch);
 
   // Already signed in and hitting /login → bounce to the dashboard (or ?next=),

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Destructive maintenance actions for the settings page.
@@ -21,7 +22,7 @@ export function DangerZone({ syncedCount }: { syncedCount: number }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/unsync-all", {
+      const res = await fetch(withBasePath("/api/unsync-all"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: "RESET" }),

@@ -19,14 +19,20 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# H2G_BASE_PATH serves the dashboard under a path prefix (README: Under a
+# sub-path). Next.js bakes it into the build, so it is a build argument.
+ARG H2G_BASE_PATH=""
 # Routes are force-dynamic, so the build never connects to a database; it only
 # needs a URL to be set, the same as the CI build. Scoped to this one command
 # so it does not end up in the image.
-RUN DATABASE_URL=postgres://build:build@localhost:5432/build npm run build
+RUN H2G_BASE_PATH="$H2G_BASE_PATH" DATABASE_URL=postgres://build:build@localhost:5432/build npm run build
 
 
 FROM node:22-bookworm-slim
 
+# Kept at runtime for the health check, which has to call the prefixed path.
+ARG H2G_BASE_PATH=""
+ENV H2G_BASE_PATH=$H2G_BASE_PATH
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=8096 \
@@ -50,6 +56,6 @@ EXPOSE 8096
 # /api/version needs no session and no database, so it says whether the server
 # is up without turning a database outage into a restart loop.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8096) + '/api/version').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8096) + (process.env.H2G_BASE_PATH || '') + '/api/version').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 CMD ["node", "server.js"]
