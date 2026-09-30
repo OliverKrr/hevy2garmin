@@ -8,6 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `H2G_PROXY_SECRET`: a reverse proxy that does its own login can vouch for a request with the `X-H2G-Proxy-Secret` header, compared in constant time, so users do not log in twice. Unset, nothing changes (#658).
 - The Hevy webhook on a self-hosted `web/` server syncs merge-first again, as the Python server did. It answers at once, waits 5 minutes, tries up to twice more 10 minutes apart to merge into the watch activity, and uploads a fresh activity only on the last attempt. `WEBHOOK_DELAY_SECONDS`, `WEBHOOK_RETRY_INTERVAL_SECONDS`, `WEBHOOK_MAX_ATTEMPTS` and `WEBHOOK_MAX_INFLIGHT` keep their Python names and defaults. Vercel and the GitHub Actions handoff are unchanged (#656).
 - The web dashboard can be served under a path prefix: `H2G_BASE_PATH`, set at build time, becomes the Next.js `basePath`, and `withBasePath()` prefixes the hand-written `fetch("/api/...")` calls and plain links that Next does not. Unset, the build is unchanged. `web/Dockerfile` takes it as a build argument, and the compose example passes it through. The Python dashboard had this since #305 (#658).
 - `web/Dockerfile` builds the dashboard from its standalone output: multi-stage, runs as the unprivileged `node` user, health check on `/api/version`, amd64 and arm64. `web/docker-compose.example.yml` runs it with Postgres 16 and a small scheduler that calls `GET /api/cron/sync` every two hours (#657).
