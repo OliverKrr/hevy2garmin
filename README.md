@@ -348,6 +348,8 @@ To serve the dashboard under a path such as `https://example.com/tools/hevy2garm
 
 With Docker, put `H2G_BASE_PATH=/tools/hevy2garmin` in `.env` before `docker compose up -d --build`, or pass `--build-arg H2G_BASE_PATH=/tools/hevy2garmin` to `docker build`. The image's health check and the compose scheduler follow it.
 
+If that proxy already makes users log in, the dashboard's own login is a second one. Set `H2G_PROXY_SECRET` to a long random value and have the proxy send it in an `X-H2G-Proxy-Secret` header on every request it forwards; a request carrying it passes the dashboard's gate as signed in. The proxy must overwrite any copy of that header a client sends. Anything that reaches the app without going through the proxy lacks the secret and meets the normal login. Unset, the header does nothing.
+
 ### Keeping it in sync
 
 The web app syncs when you press **Sync Now**, on its cron route, and on a Hevy webhook (`POST /api/cron/webhook` with `Authorization: Bearer <CRON_SECRET>`). The CLI is the other option: `hevy2garmin sync` from cron, with credentials saved by `hevy2garmin init`.

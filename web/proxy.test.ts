@@ -288,3 +288,37 @@ describe("proxy: DEMO_MODE makes an unconfigured deploy browsable (#634)", () =>
     expect(new URL(res.headers.get("location") as string).pathname).toBe("/login");
   });
 });
+
+describe("proxy: a trusted reverse proxy vouches with H2G_PROXY_SECRET", () => {
+  afterEach(() => {
+    delete process.env.H2G_PROXY_SECRET;
+  });
+
+  it("the right secret passes a gated API route without a session", async () => {
+    process.env.H2G_PROXY_SECRET = "s3cret";
+    const res = await proxy(req("/api/settings", { "x-h2g-proxy-secret": "s3cret" }));
+    expect(passedThrough(res)).toBe(true);
+  });
+
+  it("a wrong or missing secret meets the normal gate", async () => {
+    process.env.H2G_PROXY_SECRET = "s3cret";
+    expect((await proxy(req("/api/settings", { "x-h2g-proxy-secret": "s3crez" }))).status).toBe(401);
+    expect((await proxy(req("/api/settings"))).status).toBe(401);
+  });
+
+  it("without H2G_PROXY_SECRET the header does nothing", async () => {
+    const res = await proxy(req("/api/settings", { "x-h2g-proxy-secret": "" }));
+    expect(res.status).toBe(401);
+    const res2 = await proxy(req("/api/settings", { "x-h2g-proxy-secret": "anything" }));
+    expect(res2.status).toBe(401);
+  });
+
+  it("vouches even in production with no password set, and only for the secret", async () => {
+    delete process.env.H2G_PASSWORD;
+    vi.stubEnv("NODE_ENV", "production");
+    process.env.H2G_PROXY_SECRET = "s3cret";
+    expect(passedThrough(await proxy(req("/dashboard", { "x-h2g-proxy-secret": "s3cret" })))).toBe(true);
+    expect((await proxy(req("/api/settings"))).status).toBe(401);
+    vi.unstubAllEnvs();
+  });
+});
