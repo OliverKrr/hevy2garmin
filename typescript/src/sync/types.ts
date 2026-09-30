@@ -51,6 +51,7 @@ export interface FitStats {
  *   just created.
  * - `merge_pending` merge-only was asked for and no watch activity has appeared
  *   yet, so the workout is deliberately left unsynced rather than uploaded.
+ *   Nothing was written to Garmin or the store; the next attempt starts clean.
  *
  * `error` and `none` stay for now because the web routes count them. Narrowing
  * those is a separate change.
@@ -179,6 +180,23 @@ export interface SyncOneOptions {
    * before these were wired up.
    */
   merge?: MergeSettings;
+  /**
+   * Merge or nothing. When merge is on and the merge finds no Garmin activity
+   * to act on, return `merge_pending` instead of uploading a fresh one, so a
+   * later attempt can still merge once the watch activity reaches Garmin. The
+   * Python `merge_only` flag behind the webhook's staged retry (`sync.py:326`).
+   *
+   * "Found no activity" is the only case. A `replace` match is a match: the
+   * engine goes on to upload the named activity and delete the watch copy, as
+   * it would without this flag. So does a matched activity the merge could
+   * not push into, because waiting will not change that answer.
+   *
+   * It also stands in for the grace period, which exists to wait for the
+   * watch activity and is what this flag does explicitly. With merge off there
+   * is nothing to merge into, the flag does nothing, and `respectGrace` applies
+   * as usual. Live runs only; a dry run never merges. DEFAULT false.
+   */
+  mergeOnly?: boolean;
   /** The user's `hr_fusion` setting. Default on, matching the Python config. */
   hrFusion?: boolean;
   /**

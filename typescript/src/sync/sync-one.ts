@@ -146,6 +146,8 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
   const mergeOptions = mergeOptionsOf(merge);
   const hrFusion = options.hrFusion ?? true;
   const profile = options.profile;
+  // Only meaningful where a merge actually runs: live, with merge on.
+  const mergeOnly = Boolean(options.mergeOnly) && !dryRun && Boolean(merge.enabled);
   const { store } = deps;
 
   // 1) Fetch the Hevy list + the dedup id-sets, then pick the next unsynced
@@ -181,7 +183,11 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
   // The grace period. Checked before any Garmin call: a workout this new is one
   // whose watch activity may still be on the user's wrist, and uploading now is
   // what creates the duplicate the merge path exists to avoid.
-  if (respectGrace && checkGracePeriod(workout, graceMinutes).withinGrace) {
+  //
+  // Merge-only replaces it. That mode never uploads without a watch activity
+  // to merge into, so the reason for the wait is gone, and holding the
+  // workout back here would stop the merge from running at all.
+  if (respectGrace && !mergeOnly && checkGracePeriod(workout, graceMinutes).withinGrace) {
     return {
       ...emptyResult(dryRun, "within_grace", remaining),
       status: "deferred",
@@ -257,6 +263,23 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       return finishMerge(outcome.activityId, outcome.setsPushed ?? 0);
     }
     mergeFallbackReason = outcome.reason ?? null;
+    // Merge-only, and the merge found no activity at all: the watch recording
+    // has not reached Garmin yet, or Garmin could not be asked. Leave the
+    // workout for the next attempt. Nothing was claimed or written, so there
+    // is nothing to undo.
+    //
+    // Keyed on the activity id, not on `merged`. A `replace` match comes back
+    // unmerged by design, with the id set, and treating it as "not yet" is the
+    // bug the Python version had: every replace user synced only on the last
+    // attempt, about 25 minutes late.
+    if (mergeOnly && outcome.activityId == null) {
+      return {
+        ...emptyResult(false, "would_upload", remaining),
+        status: "merge_pending",
+        workout: workoutView(workout),
+        mergeFallbackReason,
+      };
+    }
     // The merge was undone because Garmin dropped the exercise names. The
     // start-time lookup would match the very activity we just restored and skip
     // the upload, so it is bypassed and the workout gets a real named one.
