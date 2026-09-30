@@ -1,0 +1,60 @@
+# The dashboard image with the sync engine built from this checkout's
+# typescript/ folder instead of the npm release web/package-lock.json pins.
+# For a fork that runs engine changes before they are published. Build from the
+# repository root (the context needs both folders):
+#
+#   docker build -f web/Dockerfile.workspace --build-arg H2G_BASE_PATH=/tools/h2g -t hevy2garmin-web .
+#
+# H2G_BASE_PATH is optional; Next.js bakes it into the build, so build the image
+# for the path it is served under. web/Dockerfile is the image for everyone else.
+
+FROM node:22-bookworm-slim AS engine
+WORKDIR /src
+COPY typescript/package.json typescript/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY typescript/ ./
+RUN npm run build && npm pack --silent --pack-destination /tmp && mv /tmp/hevy2garmin-*.tgz /tmp/engine.tgz
+
+
+FROM node:22-bookworm-slim AS deps
+WORKDIR /app
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+# Swap the pinned npm release for the engine built above. Its one runtime
+# dependency (@garmin/fitsdk) is already installed by the npm release.
+COPY --from=engine /tmp/engine.tgz /tmp/engine.tgz
+RUN rm -rf node_modules/hevy2garmin && mkdir node_modules/hevy2garmin \
+ && tar -xzf /tmp/engine.tgz -C node_modules/hevy2garmin --strip-components=1 \
+ && rm /tmp/engine.tgz
+
+
+FROM node:22-bookworm-slim AS builder
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+ARG H2G_BASE_PATH=""
+COPY --from=deps /app/node_modules ./node_modules
+COPY web/ ./
+RUN H2G_BASE_PATH="$H2G_BASE_PATH" DATABASE_URL=postgres://build:build@localhost:5432/build npm run build
+
+
+FROM node:22-bookworm-slim
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=8096 \
+    HOSTNAME=0.0.0.0
+ARG H2G_BASE_PATH=""
+ENV H2G_BASE_PATH=$H2G_BASE_PATH
+
+WORKDIR /app
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+RUN mkdir -p .next/cache && chown node:node .next/cache
+
+USER node
+EXPOSE 8096
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8096) + (process.env.H2G_BASE_PATH || '') + '/api/version').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+CMD ["node", "server.js"]
