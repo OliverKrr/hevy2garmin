@@ -10,6 +10,7 @@
  *   (+ HR + calories) → Garmin (upload). HR loop: Garmin's daily heart-rate is
  *   matched to the workout, its calories computed, and fed back into the FIT.
  */
+import { withBasePath } from "@/lib/base-path";
 
 interface Stage {
   key: string;
@@ -153,7 +154,7 @@ export function PipelineDiagram({ mappingCount }: { mappingCount?: number }) {
         </span>
         <span>
           Runs when HR fusion is on — toggle it in{" "}
-          <a href="/settings" className="text-teal underline">
+          <a href={withBasePath("/settings")} className="text-teal underline">
             Settings
           </a>
           .

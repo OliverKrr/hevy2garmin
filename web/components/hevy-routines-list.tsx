@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface Routine {
   id: string;
@@ -29,7 +30,7 @@ function RoutineRow({ r }: { r: Routine }) {
     setError(null);
     setMsg(null);
     try {
-      const res = await fetch(`/api/routines/${encodeURIComponent(r.id)}/sync`, { method: "POST" });
+      const res = await fetch(withBasePath(`/api/routines/${encodeURIComponent(r.id)}/sync`), { method: "POST" });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !d.ok) {
         setError(d.error ?? `Request failed (${res.status}).`);
@@ -57,7 +58,7 @@ function RoutineRow({ r }: { r: Routine }) {
       const payload = recurring
         ? { mode: "recurring", weekday, start_date: date, weeks: Number.parseInt(weeks || "1", 10) }
         : { date };
-      const res = await fetch(`/api/routines/${encodeURIComponent(r.id)}/schedule`, {
+      const res = await fetch(withBasePath(`/api/routines/${encodeURIComponent(r.id)}/schedule`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -191,7 +192,7 @@ export function HevyRoutinesList() {
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/hevy-routines")
+    fetch(withBasePath("/api/hevy-routines"))
       .then((res) => res.json())
       .then((d: { routines?: Routine[]; error?: string; demo?: boolean }) => {
         if (!alive) return;
@@ -227,7 +228,7 @@ export function HevyRoutinesList() {
     for (const r of list) {
       if (stopRef.current) break;
       try {
-        const res = await fetch(`/api/routines/${encodeURIComponent(r.id)}/sync`, { method: "POST" });
+        const res = await fetch(withBasePath(`/api/routines/${encodeURIComponent(r.id)}/sync`), { method: "POST" });
         const d = (await res.json().catch(() => ({}))) as { ok?: boolean };
         if (res.ok && d.ok) synced += 1;
         else failed += 1;

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface CategoryOption {
   id: number;
@@ -26,7 +27,7 @@ export function UnmappedCard({ categories }: { categories: CategoryOption[] }) {
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/unmapped-exercises")
+    fetch(withBasePath("/api/unmapped-exercises"))
       .then((r) => r.json())
       .then((d: { unmapped?: Unmapped[] }) => {
         if (!alive) return;
@@ -82,7 +83,7 @@ function UnmappedRow({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/mapping", {
+      const res = await fetch(withBasePath("/api/mapping"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hevy_name: item.name, category, subcategory: Number.parseInt(sub || "0", 10) }),

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Connect-Garmin form for the setup page. Three modes:
@@ -69,7 +70,7 @@ export function ConnectGarmin({ connected }: { connected: boolean }) {
     }
     setBusy(true);
     try {
-      const res = await fetch("/api/garmin-login", {
+      const res = await fetch(withBasePath("/api/garmin-login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim(), password }),
@@ -104,7 +105,7 @@ export function ConnectGarmin({ connected }: { connected: boolean }) {
     }
     setBusy(true);
     try {
-      const res = await fetch("/api/garmin-login-mfa", {
+      const res = await fetch(withBasePath("/api/garmin-login-mfa"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId, mfa_code: mfaCode.trim() }),
@@ -122,7 +123,7 @@ export function ConnectGarmin({ connected }: { connected: boolean }) {
   /** Best-effort record of a Garmin rate-limit cooldown. */
   async function recordCooldown() {
     try {
-      await fetch("/api/garmin-rate-limited", { method: "POST" });
+      await fetch(withBasePath("/api/garmin-rate-limited"), { method: "POST" });
     } catch {
       /* best-effort */
     }
@@ -154,7 +155,7 @@ export function ConnectGarmin({ connected }: { connected: boolean }) {
         setError(tokens.error ?? "That ticket could not be exchanged. Sign in again for a fresh one.");
         return;
       }
-      const res = await fetch("/api/garmin-ticket", {
+      const res = await fetch(withBasePath("/api/garmin-ticket"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

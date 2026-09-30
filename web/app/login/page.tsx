@@ -2,6 +2,7 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { withBasePath } from "@/lib/base-path";
 
 function LoginForm() {
   const [password, setPassword] = useState("");
@@ -29,7 +30,7 @@ function LoginForm() {
     setError("");
     const next = safeNext(params.get("next"));
     try {
-      const res = await fetch(`/api/login?next=${encodeURIComponent(next)}`, {
+      const res = await fetch(withBasePath(`/api/login?next=${encodeURIComponent(next)}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),

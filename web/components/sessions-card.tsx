@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Sessions & Security card for the settings page. "Sign out everywhere" bumps
@@ -19,7 +20,7 @@ export function SessionsCard() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/logout-all", { method: "POST" });
+      const res = await fetch(withBasePath("/api/logout-all"), { method: "POST" });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !d.ok) {
         setError(d.error ?? `Request failed (${res.status}).`);

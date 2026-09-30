@@ -3,6 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: "◉" },
@@ -28,7 +29,7 @@ export function NavBar({ authEnabled = false }: { authEnabled?: boolean }) {
   async function logout() {
     setLoggingOut(true);
     try {
-      await fetch("/api/logout", { method: "POST" });
+      await fetch(withBasePath("/api/logout"), { method: "POST" });
     } catch {
       // ignore — navigate to login regardless
     }

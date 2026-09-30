@@ -181,6 +181,29 @@ function demoRefusal(): NextResponse {
   return NextResponse.json({ ok: false, error: "Read-only in demo mode" }, { status: 403 });
 }
 
+/* A trusted reverse proxy in front of a self-hosted dashboard can vouch for a
+   request: with H2G_PROXY_SECRET set, a request carrying that value in the
+   X-H2G-Proxy-Secret header passes the gate as signed in. The proxy does its
+   own login and must replace any client-sent copy of the header. Anything that
+   bypasses the proxy (another local client, a container on the same network)
+   lacks the secret and meets the normal gate. Unset, nothing changes. */
+const PROXY_SECRET_HEADER = "x-h2g-proxy-secret";
+
+async function sha256(s: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+}
+
+/** Constant-time: both sides are hashed to 32 bytes and every byte is compared. */
+export async function proxySecretOk(req: NextRequest): Promise<boolean> {
+  const secret = process.env.H2G_PROXY_SECRET ?? "";
+  const sent = req.headers.get(PROXY_SECRET_HEADER);
+  if (!secret || !sent) return false;
+  const [a, b] = await Promise.all([sha256(sent), sha256(secret)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
 /** Gate every page + API route behind the shared-password session (mirrors auth.py).
     When no secret/password is set: open in development, but a production deploy serves only
     the setup and login pages until one is configured (#550). */
@@ -196,6 +219,7 @@ export async function proxy(req: NextRequest) {
   ) {
     return demoRefusal();
   }
+  if (await proxySecretOk(req)) return NextResponse.next();
   if (!authEnabled()) {
     if (!productionRuntime()) return NextResponse.next();
     if (UNCONFIGURED_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
@@ -214,7 +238,7 @@ export async function proxy(req: NextRequest) {
   if (pathname === "/api/session-epoch") return NextResponse.next();
 
   const cookie = req.cookies.get(SESSION_COOKIE)?.value ?? null;
-  const epoch = await currentEpoch(req.nextUrl.origin);
+  const epoch = await currentEpoch(req.nextUrl.origin + req.nextUrl.basePath);
   const authed = await verifySession(cookie, epoch);
 
   // Already signed in and hitting /login → bounce to the dashboard (or ?next=),

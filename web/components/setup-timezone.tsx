@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * The timezone, asked for during setup (#639).
@@ -43,7 +44,7 @@ export function SetupTimezone({ current }: { current: string | null }) {
     setError(null);
     setSaved(null);
     try {
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withBasePath("/api/settings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_profile: { timezone: value } }),

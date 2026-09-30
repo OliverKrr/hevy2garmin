@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Connect-Hevy form for the setup page. Sends the entered API key to
@@ -26,7 +27,7 @@ export function ConnectHevy({ connected }: { connected: boolean }) {
     }
     setBusy(true);
     try {
-      const res = await fetch("/api/connect-hevy", {
+      const res = await fetch(withBasePath("/api/connect-hevy"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: trimmed }),

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface Props {
   /** A GitHub token is saved (platform_credentials 'github'); the value itself is never sent to the browser. */
@@ -77,7 +78,7 @@ export function SettingsForm(p: Props) {
   async function pullFromGarmin() {
     setPulling(true); setPullMsg(null);
     try {
-      const res = await fetch("/api/pull-garmin-profile", { method: "POST" });
+      const res = await fetch(withBasePath("/api/pull-garmin-profile"), { method: "POST" });
       const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; profile?: { weight_kg?: number | null; birth_year?: number | null; sex?: string | null; vo2max?: number | null } };
       if (!res.ok || !j.ok || !j.profile) { setPullMsg(j.error ?? `Request failed (${res.status}).`); return; }
       if (j.profile.weight_kg != null) setWeight(String(j.profile.weight_kg));
@@ -159,7 +160,7 @@ export function SettingsForm(p: Props) {
         },
       };
       if (githubPat.trim()) (body as Record<string, unknown>).github_pat = githubPat.trim();
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withBasePath("/api/settings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

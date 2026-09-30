@@ -10,6 +10,7 @@ import {
   type LoopState,
   type SyncOneLike,
 } from "@/lib/sync-loop";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Live "Sync all" for the dashboard — ports the Python syncNow() loop. Clicking
@@ -30,7 +31,7 @@ import {
  */
 async function recordRun(state: LoopState): Promise<void> {
   try {
-    await fetch("/api/sync-run", {
+    await fetch(withBasePath("/api/sync-run"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -70,7 +71,7 @@ export function SyncLoop({ ready }: { ready: boolean }) {
         try {
           // batch=1: this loop posts ONE aggregate row to /api/sync-run when it
           // finishes, so the route must not also write a row per workout.
-          const res = await fetch("/api/sync-one?live=1&batch=1", {
+          const res = await fetch(withBasePath("/api/sync-one?live=1&batch=1"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ live: 1 }),

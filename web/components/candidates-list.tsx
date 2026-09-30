@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface Candidate {
   hevy_id: string;
@@ -47,7 +48,7 @@ function CandidateRow({ c, onSynced }: { c: Candidate; onSynced: (id: string) =>
     setBusy(live ? "live" : "preview");
     setError(null);
     try {
-      const res = await fetch(`/api/sync/${encodeURIComponent(c.hevy_id)}${live ? "?live=1" : ""}`, {
+      const res = await fetch(withBasePath(`/api/sync/${encodeURIComponent(c.hevy_id)}${live ? "?live=1" : ""}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(live ? { live: 1 } : {}),
@@ -140,7 +141,7 @@ export function CandidatesList() {
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/candidates")
+    fetch(withBasePath("/api/candidates"))
       .then((r) => r.json())
       .then((d: { candidates?: Candidate[]; error?: string; demo?: boolean }) => {
         if (d.demo) setDemo(true);
