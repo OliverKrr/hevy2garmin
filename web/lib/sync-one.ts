@@ -9,6 +9,7 @@
  *   fetchWorkouts→ the app's Hevy key resolution (fetchAllWorkouts)
  *   hr           → ./hr-store (the hr_cache table and the durable backup)
  *   settings     → ./sync-settings (what the user saved on the Settings page)
+ *   strava       → ./strava-store (app_cache), when STRAVA_* credentials are set
  *
  * The settings are the point of this module now. The engine can merge and fuse
  * heart rate, and it only does either when told to, so without this the Settings
@@ -21,6 +22,10 @@ import {
   garminGateway,
   intervalsCleanupHook,
   listCandidates as engineListCandidates,
+  parseStravaMode,
+  recheckStravaObservations,
+  stravaObserveHook,
+  type StravaConfig,
   syncOneWorkout as engineSyncOneWorkout,
   type GarminGateway,
   type SyncDeps,
@@ -33,6 +38,7 @@ import { hrDepsFor, type HrWorkout } from "./hr-store";
 import { postgresSyncStore } from "./sync-store";
 import { loadSyncSettings, loadSyncStartDate } from "./sync-settings";
 import { parseStartDate, withinSyncWindow } from "./sync-window";
+import { postgresStravaStore } from "./strava-store";
 import type { Sql } from "./pending-store";
 
 export type {
@@ -55,6 +61,56 @@ export interface SyncOneOptions extends EngineSyncOneOptions {
   fetchWorkouts?: () => Promise<HevyWorkout[]>;
   /** Test seam: replace the Garmin client. Default: getGarminClient(). */
   garminClientFactory?: () => Promise<GarminClient>;
+}
+
+/**
+ * The Strava cleanup's configuration, or null when it is not set up.
+ *
+ * Opt-in through STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET, plus a refresh
+ * token to start from. STRAVA_CLEANUP_MODE picks off, report or mute and
+ * defaults to report, which observes and never writes to Strava. There is no
+ * base-URL override on purpose: the access token only ever goes to Strava.
+ */
+export function stravaConfig(sql: Sql): StravaConfig | null {
+  const clientId = process.env.STRAVA_CLIENT_ID;
+  const clientSecret = process.env.STRAVA_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+  const mode = parseStravaMode(process.env.STRAVA_CLEANUP_MODE);
+  if (mode === "off") return null;
+  return {
+    clientId,
+    clientSecret,
+    refreshToken: process.env.STRAVA_REFRESH_TOKEN,
+    mode,
+    store: postgresStravaStore(sql),
+    log: (line) => console.log(line),
+  };
+}
+
+/**
+ * Run every configured cleanup after a watch delete, each on its own.
+ *
+ * Strava goes first. Its snapshot is the baseline that later decides which
+ * copy is stale, and our upload is already on Garmin at this point, so every
+ * second before it is taken is a second in which Garmin can push our copy to
+ * Strava too. If that happens both copies land in the baseline, neither can be
+ * called ours, and nothing is muted. The failure is safe but wasted.
+ */
+function watchDeletedHooks(sql: Sql): SyncDeps["onWatchActivityDeleted"] {
+  const hooks = [
+    stravaObserveHook(stravaConfig(sql)),
+    intervalsCleanupHook({
+      apiKey: process.env.INTERVALS_API_KEY,
+      athleteId: process.env.INTERVALS_ATHLETE_ID,
+    }),
+  ].filter((h): h is NonNullable<typeof h> => h != null);
+  if (!hooks.length) return undefined;
+  return async (activityId, workoutStart, context) => {
+    for (const hook of hooks) {
+      // One service failing must not skip the other.
+      await hook(activityId, workoutStart, context).catch(() => {});
+    }
+  };
 }
 
 /** Bind the engine to this app's store, Garmin client, Hevy fetch and HR storage. */
@@ -90,15 +146,13 @@ export function buildSyncDeps(sql: Sql, options: SyncOneOptions = {}): SyncDeps 
     },
     hr: hrDepsFor(sql, () => seen),
     // A replace deletes the watch's own copy from Garmin, and that copy has
-    // usually already reached intervals.icu, where our named upload then
-    // arrives as a second one. The hook removes the stale copy. It is null
-    // unless both credentials are set, and undefined rather than a no-op
-    // function makes the engine skip the step outright for everyone else.
-    onWatchActivityDeleted:
-      intervalsCleanupHook({
-        apiKey: process.env.INTERVALS_API_KEY,
-        athleteId: process.env.INTERVALS_ATHLETE_ID,
-      }) ?? undefined,
+    // usually already reached intervals.icu and Strava, where our named upload
+    // then arrives as a second one. intervals.icu can delete the stale copy;
+    // Strava gets its window recorded, and is dealt with by the recheck in
+    // syncOneWorkout below. Undefined unless one of them is configured, rather
+    // than a no-op function, so the engine skips the step outright for
+    // everyone else.
+    onWatchActivityDeleted: watchDeletedHooks(sql),
   };
 }
 
@@ -117,11 +171,25 @@ export function listCandidates(sql: Sql, options: SyncOneOptions = {}) {
 export async function syncOneWorkout(sql: Sql, options: SyncOneOptions = {}) {
   const { fetchWorkouts: _f, garminClientFactory: _g, ...engineOptions } = options;
   const saved = await loadSyncSettings(sql);
-  return engineSyncOneWorkout(buildSyncDeps(sql, options), {
+  const result = await engineSyncOneWorkout(buildSyncDeps(sql, options), {
     merge: saved.merge,
     hrFusion: saved.hrFusion,
     descriptionEnabled: saved.descriptionEnabled,
     profile: saved.profile,
     ...engineOptions, // an explicit option still wins, which is what tests rely on
   });
+  // Our Strava copy arrives through Garmin's push minutes after the sync that
+  // uploaded it, so the record opened at delete time has to be looked at again
+  // by some later request. This is the one function the cron, the webhook and
+  // the dashboard all go through, so hanging it here reaches every trigger;
+  // hanging it off any one route is how the Python version once lost a
+  // trigger. A run that finds nothing to sync is exactly when it matters.
+  // Live runs only: a dry run promises no writes, and this can write. It
+  // resolves on every failure and throttles itself, so a batch of calls
+  // polls Strava once.
+  if (result.dryRun === false) {
+    const strava = stravaConfig(sql);
+    if (strava) await recheckStravaObservations(strava);
+  }
+  return result;
 }
