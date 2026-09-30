@@ -211,6 +211,16 @@ _STRENGTH_TYPES = {"WeightTraining", "Workout", "Crossfit", "HighIntensityInterv
 # test on the end delta therefore rejected our own copy that day, which is why
 # the bound below is one-sided: it can rule an activity *out* of being ours, and
 # never in.
+#
+# Since 2026-09-25 Strava reports our copy differently, with no change on our
+# side (the image dates from 2026-09-07): the start is still the first record,
+# but ``elapsed_time`` is now the full Hevy duration. So our copy's span is the
+# Hevy window shifted by the start offset, and its end *overhangs* the Hevy end
+# by exactly that much (+31 s/+31 s on 2026-09-25, +38 s/+38 s on 2026-09-28,
+# elapsed 3482 s and 2577 s, both the Hevy durations to the second). An end
+# bound rejected our own copy both days and the mute never fired. What holds
+# under both behaviours: our copy starts inside the Hevy window, and it is never
+# longer than the Hevy workout.
 _SPAN_TOLERANCE_S = 10
 
 
@@ -231,7 +241,7 @@ def _delta(value: object) -> str:
     return f"{value:+}s" if isinstance(value, int) else "?"
 
 
-def _classify(entry: dict, baseline_ids: set | None) -> str:
+def _classify(entry: dict, baseline_ids: set | None, hevy_duration_s: int | None) -> str:
     """Label one Strava activity. Provenance decides; timing only rules out.
 
     ``baseline_ids`` is what the window held at the moment we deleted the watch
@@ -254,15 +264,16 @@ def _classify(entry: dict, baseline_ids: set | None) -> str:
     if not str(entry.get("external_id") or "").startswith("garmin_ping_"):
         return "unknown"
 
-    # Our copy's span sits inside the Hevy window (see _SPAN_TOLERANCE_S): it
-    # cannot start before the Hevy start, and it cannot end after the Hevy end.
-    # Anything outside that is some other recording, whichever way it leans.
-    delta_start, delta_end = entry.get("delta_start_s"), entry.get("delta_end_s")
+    # Our copy starts inside the Hevy window and is never longer than the Hevy
+    # workout (see _SPAN_TOLERANCE_S). Its end is not bounded: Strava has placed
+    # it both on and past the Hevy end. Anything else is some other recording.
+    delta_start, delta_elapsed = entry.get("delta_start_s"), entry.get("delta_elapsed_s")
     within_hevy_span = (
         delta_start is not None
-        and delta_end is not None
-        and delta_start >= -_SPAN_TOLERANCE_S
-        and delta_end <= _SPAN_TOLERANCE_S
+        and delta_elapsed is not None
+        and hevy_duration_s is not None
+        and -_SPAN_TOLERANCE_S <= delta_start < hevy_duration_s
+        and delta_elapsed <= _SPAN_TOLERANCE_S
     )
     if baseline_ids is None:
         # No usable baseline (the delete-time fetch failed). Fall back to the
@@ -316,7 +327,7 @@ def _derive(entry: dict, record: dict) -> dict:
         out["delta_end_s"] = int((start + timedelta(seconds=elapsed) - hevy_end).total_seconds())
     else:
         out["delta_end_s"] = None
-    out["verdict"] = _classify(out, baseline_ids)
+    out["verdict"] = _classify(out, baseline_ids, hevy_duration_s)
     return out
 
 

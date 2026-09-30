@@ -219,8 +219,10 @@ def test_a_failed_baseline_fetch_never_backfills_a_later_one(strava_env, store):
     record = store.data["strava_observations"]["records"][0]
     assert record["baseline_ids"] is None
     assert record["basis"] == "time_only"
+    # Both copies fit the span bound, so timing alone cannot tell them apart.
+    # That is why a baseline-less record never writes.
     verdicts = sorted(a["verdict"] for a in _entries(record))
-    assert verdicts == ["ours?", "stale?"]
+    assert verdicts == ["ours?", "ours?"]
 
 
 def test_hevy_direct_post_is_labelled_separately(strava_env, store):
@@ -386,6 +388,94 @@ def test_an_earlier_recording_is_not_claimed_as_ours(strava_env, store):
     record = store.data["strava_observations"]["records"][0]
     verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
     assert verdicts[8] == "unknown"
+    assert record["ours_present"] is False
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-28 pair: Strava now reports our copy for the full Hevy duration
+# ---------------------------------------------------------------------------
+#
+# From 2026-09-25 on, our copy's elapsed_time is the Hevy duration to the second
+# while its start is still the first fused HR record, 38 s in. Its end therefore
+# overhangs the Hevy end by those 38 s, and the old end bound called our own
+# copy "unknown", so the mute never fired on a real duplicate.
+
+HEVY_START_0928 = "2026-09-28T16:56:23+00:00"
+HEVY_END_0928 = "2026-09-28T17:39:20+00:00"  # +2577 s
+
+
+def _act_0928(**over):
+    """The real 2026-09-28 watch copy, as Strava reported it."""
+    base = {
+        "id": 20367356064,
+        "start_date": "2026-09-28T16:57:01Z",
+        "elapsed_time": 2546,
+        "moving_time": 2546,
+        "sport_type": "WeightTraining",
+        "name": "Evening Weight Training",
+        "external_id": "garmin_ping_635284651929",
+        "upload_id": 21522664840,
+        "manual": False,
+        "device_name": "Garmin Enduro 3",
+        "hide_from_home": False,
+    }
+    base.update(over)
+    return base
+
+
+_OURS_0928 = _act_0928(id=20367748364, elapsed_time=2577, moving_time=2577,
+                       external_id="garmin_ping_635293662146",
+                       upload_id=21523060905, device_name=None)
+
+
+def _observe_0928(activities, store):
+    tok, get = _window(activities)
+    with tok, get:
+        observe_window(hevy_id="w0928", workout_start=HEVY_START_0928,
+                       workout_end=HEVY_END_0928, watch_activity_id=24532059603,
+                       replacement_activity_id=24532432798)
+    return store.data.get("strava_observations", {}).get("records", [])
+
+
+def test_our_copy_ending_past_the_hevy_end_is_still_ours(strava_env, store):
+    _observe_0928([_act_0928()], store)
+    tok, get = _window([_act_0928(), _OURS_0928])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    entries = {a["id"]: a for a in _entries(record)}
+    ours = entries[_OURS_0928["id"]]
+    assert (ours["delta_start_s"], ours["delta_end_s"], ours["delta_elapsed_s"]) == (38, 38, 0)
+    assert ours["verdict"] == "ours"
+    assert entries[_act_0928()["id"]]["verdict"] == "stale"
+    assert record["closed_reason"] == "duplicate_confirmed"
+
+
+def test_mute_fires_on_the_overhanging_pair(strava_env, store, monkeypatch):
+    monkeypatch.setenv("STRAVA_CLEANUP_MODE", "mute")
+    _observe_0928([_act_0928()], store)
+    muted = _act_0928(name=f"{DUP_PREFIX}Evening Weight Training", hide_from_home=True)
+    tok = patch("hevy2garmin.strava._get_access_token", return_value="tok")
+    get = patch("hevy2garmin.strava.requests.get",
+                side_effect=[_resp([_act_0928(), _OURS_0928]), _resp([muted, _OURS_0928])])
+    with tok, get, patch("hevy2garmin.strava.requests.put", return_value=_resp({})) as put:
+        recheck_observations()
+    assert put.call_count == 1
+    assert str(_act_0928()["id"]) in put.call_args[0][0]
+    assert store.data["strava_observations"]["records"][0]["closed_reason"] == "duplicate_cleaned"
+
+
+def test_a_late_arrival_longer_than_the_hevy_workout_is_not_ours(strava_env, store):
+    """Starting inside the window is not enough: our copy is never longer."""
+    _observe_0928([_act_0928()], store)
+    longer = _act_0928(id=9, elapsed_time=2577 + 600, external_id="garmin_ping_1",
+                       device_name=None)
+    tok, get = _window([_act_0928(), longer])
+    with tok, get:
+        recheck_observations()
+    record = store.data["strava_observations"]["records"][0]
+    verdicts = {a["id"]: a["verdict"] for a in _entries(record)}
+    assert verdicts[9] == "unknown"
     assert record["ours_present"] is False
 
 
