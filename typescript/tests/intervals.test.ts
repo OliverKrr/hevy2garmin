@@ -189,7 +189,7 @@ describe("the hook is wired to BOTH delete sites", () => {
     );
 
     expect(gw.deleteActivity).toHaveBeenCalledWith(777);
-    expect(onWatchActivityDeleted).toHaveBeenCalledWith(777, "2026-08-01T10:00:00Z");
+    expect(onWatchActivityDeleted).toHaveBeenCalledWith(777, "2026-08-01T10:00:00Z", expect.anything());
   });
 });
 

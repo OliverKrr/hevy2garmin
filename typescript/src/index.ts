@@ -10,5 +10,6 @@ export * from "./merge-match";
 export * from "./exercise-strings";
 export * from "./rate-limit";
 export * from "./intervals";
+export * from "./strava";
 export * from "./exercise-sets";
 export * from "./hr";

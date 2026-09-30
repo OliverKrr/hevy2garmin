@@ -125,6 +125,24 @@ export interface SyncDeps {
    *
    * Never awaited for its result and never allowed to throw: the Garmin delete
    * has already happened, and tidying elsewhere must not fail the sync.
+   *
+   * The third argument came later, for the Strava cleanup, which has to key what
+   * it records on the workout and needs its end. Optional so a hook written
+   * for two arguments keeps working.
    */
-  onWatchActivityDeleted?: (activityId: number | string, workoutStart: string) => Promise<void>;
+  onWatchActivityDeleted?: (
+    activityId: number | string,
+    workoutStart: string,
+    context?: WatchActivityDeletedContext,
+  ) => Promise<void>;
+}
+
+/** What the engine knows about the replace whose watch copy it just deleted. */
+export interface WatchActivityDeletedContext {
+  /** The Hevy workout id. */
+  hevyId: string;
+  /** The Hevy workout's end, when the workout carries one. */
+  workoutEnd: string | null;
+  /** Our named activity, the one that replaced the deleted watch copy. */
+  replacementActivityId: number | string | null;
 }
