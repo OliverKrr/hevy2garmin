@@ -121,7 +121,13 @@ export async function finalizePending(deps: RecoveryDeps, hevyId: string): Promi
           // whichever path the user actually took (#586).
           const workoutStart = startTimeOf(pl.workout);
           if (deps.onWatchActivityDeleted && workoutStart) {
-            await deps.onWatchActivityDeleted(Number(watchId), workoutStart).catch(() => {});
+            const workoutEnd = pl.workout?.end_time;
+            await deps
+              .onWatchActivityDeleted(Number(watchId), workoutStart, {
+                hevyId,
+                workoutEnd: typeof workoutEnd === "string" && workoutEnd ? workoutEnd : null,
+              })
+              .catch(() => {});
           }
         } catch (err) {
           // Count rather than retry for ever. Three failures against a Garmin

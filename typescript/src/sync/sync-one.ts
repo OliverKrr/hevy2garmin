@@ -556,7 +556,12 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
           // Never allowed to fail the sync: the Garmin delete already happened
           // and tidying elsewhere is not worth losing it over (#586).
           if (deps.onWatchActivityDeleted && startTime) {
-            await deps.onWatchActivityDeleted(watchActivityId, startTime).catch(() => {});
+            await deps
+              .onWatchActivityDeleted(watchActivityId, startTime, {
+                hevyId: wid,
+                workoutEnd: typeof workout.end_time === "string" && workout.end_time ? workout.end_time : null,
+              })
+              .catch(() => {});
           }
         } catch (e) {
           // Two activities is a worse outcome than one, but it is recoverable
