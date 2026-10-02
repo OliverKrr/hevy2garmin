@@ -12,3 +12,4 @@ export * from "./rate-limit";
 export * from "./intervals";
 export * from "./exercise-sets";
 export * from "./hr";
+export * from "./strava";
