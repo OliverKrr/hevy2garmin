@@ -3,6 +3,7 @@ import { authEnabled, productionRuntime } from "@/lib/auth";
 import { loadGarminConnection, loadHevyConnection, type Connection } from "@/lib/connections";
 import { ConnectHevy } from "@/components/connect-hevy";
 import { ConnectGarmin } from "@/components/connect-garmin";
+import { directGarminLogin } from "@/lib/garmin-direct-login";
 import { SetupTimezone } from "@/components/setup-timezone";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
@@ -160,7 +161,7 @@ export default async function SetupPage() {
             Connected {fmtDate(data.garmin.connectedAt)}.
           </p>
         )}
-        <ConnectGarmin connected={garminConnected} />
+        <ConnectGarmin connected={garminConnected} directLogin={directGarminLogin()} />
       </section>
 
       {/* Timezone (#639). Last, because it only matters once something can sync,
