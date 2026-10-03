@@ -9,12 +9,14 @@ import { withBasePath } from "@/lib/base-path";
  *   1. email/password → POST /api/garmin-login
  *   2. two-factor code → POST /api/garmin-login-mfa (when step 1 returns needs_mfa)
  *   3. manual ticket fallback → sign in on Garmin's own widget, paste the
- *      resulting ST-… ticket, exchange it at the CF Worker /exchange for DI
- *      tokens, then POST /api/garmin-ticket. Revealed when Garmin forces a
+ *      resulting ST-… ticket, exchange it for DI tokens (at the CF Worker
+ *      /exchange, or with `directLogin` at this server's
+ *      /api/garmin-ticket-exchange), then POST /api/garmin-ticket. Revealed when Garmin forces a
  *      captcha (needs_captcha), or on demand via "having trouble?".
  *
  * Credentials are forwarded to the login Worker only to obtain a token and are
- * never stored or echoed back.
+ * never stored or echoed back. With `directLogin` (fork: H2G_DIRECT_GARMIN_LOGIN)
+ * no Worker is involved: the server signs in to Garmin itself.
  */
 
 // The Garmin embed sign-in widget (opens in a new tab); after login the URL
@@ -39,7 +41,7 @@ function extractTicket(raw: string): string | null {
   return t.startsWith("ST-") ? t : null;
 }
 
-export function ConnectGarmin({ connected }: { connected: boolean }) {
+export function ConnectGarmin({ connected, directLogin = false }: { connected: boolean; directLogin?: boolean }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -142,8 +144,9 @@ export function ConnectGarmin({ connected }: { connected: boolean }) {
     }
     setBusy(true);
     try {
-      // Exchange the ticket for DI tokens at the CF Worker (returns them directly).
-      const ex = await fetch(WORKER_EXCHANGE_URL, {
+      // Exchange the ticket for DI tokens: at the CF Worker, or on this server
+      // when direct login is on, so the ticket never leaves it but for Garmin.
+      const ex = await fetch(directLogin ? withBasePath("/api/garmin-ticket-exchange") : WORKER_EXCHANGE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket }),

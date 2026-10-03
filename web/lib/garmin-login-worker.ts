@@ -6,6 +6,7 @@
  * (GARMIN_LOGIN_WORKER_URL, else the ecosystem's shared deploy) and keeps the
  * names the two login routes call.
  */
+import { directGarminLogin, localWorkerFetch, LOCAL_WORKER_URL } from "./garmin-direct-login";
 import { createSsoWorkerClient, tokensFromResult, DEFAULT_SSO_WORKER_URL, type SsoFetch, type WorkerLoginResult } from "garmin-auth/sso-worker";
 
 export { tokensFromResult };
@@ -14,6 +15,11 @@ export type FetchImpl = SsoFetch;
 export const DEFAULT_GARMIN_LOGIN_WORKER_URL = DEFAULT_SSO_WORKER_URL;
 
 function client(fetchImpl?: FetchImpl) {
+  // Fork: with H2G_DIRECT_GARMIN_LOGIN on, the Worker's code runs in this
+  // process and no Worker URL is ever used (./garmin-direct-login.ts).
+  if (directGarminLogin()) {
+    return createSsoWorkerClient({ workerUrl: LOCAL_WORKER_URL, fetchImpl: localWorkerFetch });
+  }
   return createSsoWorkerClient({ workerUrl: process.env.GARMIN_LOGIN_WORKER_URL, fetchImpl });
 }
 
