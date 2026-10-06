@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   writes: [] as string[],
+  inserts: [] as string[],
+  updateCount: 1,
   getAllWorkouts: vi.fn(async () => [] as unknown[]),
 }));
 
@@ -18,7 +20,11 @@ vi.mock("./db", () => ({
   getDb: () => {
     const tag = ((strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
-      if (text.includes("UPDATE platform_credentials")) h.writes.push(String(values[0]));
+      if (text.includes("UPDATE platform_credentials")) {
+        h.writes.push(String(values[0]));
+        return Promise.resolve(Object.assign([], { count: h.updateCount }));
+      }
+      if (text.includes("INSERT INTO platform_credentials")) h.inserts.push(String(values[0]));
       if (text.includes("SELECT credentials")) {
         return Promise.resolve([{ credentials: { api_key: "k" } }]);
       }
@@ -47,6 +53,9 @@ import { HevyAuthError } from "hevy2garmin";
 
 beforeEach(() => {
   h.writes.length = 0;
+  h.inserts.length = 0;
+  h.updateCount = 1;
+  delete process.env.HEVY_API_KEY;
   h.getAllWorkouts.mockReset();
 });
 
@@ -91,5 +100,29 @@ describe("it does not make things worse", () => {
     h.getAllWorkouts.mockResolvedValue([{ id: "w1" }, { id: "w2" }]);
     const out = await fetchAllWorkouts("k");
     expect(out.map((w) => (w as { id: string }).id)).toEqual(["w1", "w2"]);
+  });
+});
+
+describe("a key from HEVY_API_KEY has no row to mark (fork)", () => {
+  it("writes a status-only row when Hevy rejects it", async () => {
+    process.env.HEVY_API_KEY = "k";
+    h.updateCount = 0;
+    h.getAllWorkouts.mockRejectedValue(new HevyAuthError("revoked"));
+    await expect(fetchAllWorkouts()).rejects.toBeInstanceOf(HevyAuthError);
+    expect(h.inserts).toEqual(["disconnected"]);
+  });
+
+  it("writes nothing extra when a row exists", async () => {
+    process.env.HEVY_API_KEY = "k";
+    h.getAllWorkouts.mockRejectedValue(new HevyAuthError("revoked"));
+    await expect(fetchAllWorkouts()).rejects.toBeInstanceOf(HevyAuthError);
+    expect(h.inserts).toEqual([]);
+  });
+
+  it("writes nothing without an env key", async () => {
+    h.updateCount = 0;
+    h.getAllWorkouts.mockRejectedValue(new HevyAuthError("revoked"));
+    await expect(fetchAllWorkouts()).rejects.toBeInstanceOf(HevyAuthError);
+    expect(h.inserts).toEqual([]);
   });
 });
