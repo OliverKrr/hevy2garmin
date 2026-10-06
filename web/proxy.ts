@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { PROXY_SECRET_HEADER, proxySecretMatches } from "./lib/proxy-secret";
+import { directGarminLogin } from "./lib/direct-login-flag";
 
 /* Session verify is INLINED here (not imported from @/lib/auth) because Vercel's
    proxy bundler rejects a cross-module reference from the proxy even when the
@@ -196,7 +197,18 @@ export async function proxySecretOk(req: NextRequest): Promise<boolean> {
 /** Gate every page + API route behind the shared-password session (mirrors auth.py).
     When no secret/password is set: open in development, but a production deploy serves only
     the setup and login pages until one is configured (#550). */
+/** Fork: with H2G_DIRECT_GARMIN_LOGIN on, pages may only connect back to this
+    server, so no browser-side code (today's or a future upstream one) can post
+    to a Cloudflare Worker. The server-side half is lib/worker-block.ts. */
+export const DIRECT_LOGIN_CSP = "connect-src 'self'";
+
 export async function proxy(req: NextRequest) {
+  const res = await gate(req);
+  if (directGarminLogin()) res.headers.set("Content-Security-Policy", DIRECT_LOGIN_CSP);
+  return res;
+}
+
+async function gate(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   if (STATIC_PREFIX.test(pathname)) return NextResponse.next();
   // Before the auth gate on purpose: a demo with auth disabled is still read-only.
