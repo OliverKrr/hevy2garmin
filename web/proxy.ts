@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { PROXY_SECRET_HEADER, proxySecretMatches } from "./lib/proxy-secret";
 
 /* Session verify is INLINED here (not imported from @/lib/auth) because Vercel's
    proxy bundler rejects a cross-module reference from the proxy even when the
@@ -187,21 +188,9 @@ function demoRefusal(): NextResponse {
    own login and must replace any client-sent copy of the header. Anything that
    bypasses the proxy (another local client, a container on the same network)
    lacks the secret and meets the normal gate. Unset, nothing changes. */
-const PROXY_SECRET_HEADER = "x-h2g-proxy-secret";
-
-async function sha256(s: string): Promise<Uint8Array> {
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
-}
-
-/** Constant-time: both sides are hashed to 32 bytes and every byte is compared. */
+/** Constant-time check of X-H2G-Proxy-Secret, see lib/proxy-secret.ts. */
 export async function proxySecretOk(req: NextRequest): Promise<boolean> {
-  const secret = process.env.H2G_PROXY_SECRET ?? "";
-  const sent = req.headers.get(PROXY_SECRET_HEADER);
-  if (!secret || !sent) return false;
-  const [a, b] = await Promise.all([sha256(sent), sha256(secret)]);
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
+  return proxySecretMatches(req.headers.get(PROXY_SECRET_HEADER));
 }
 
 /** Gate every page + API route behind the shared-password session (mirrors auth.py).
