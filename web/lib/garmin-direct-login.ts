@@ -16,9 +16,7 @@
  */
 import worker, { type LocalWorkerKv } from "./garmin-sso-local/worker.js";
 
-export function directGarminLogin(): boolean {
-  return /^(1|true|yes|on)$/i.test((process.env.H2G_DIRECT_GARMIN_LOGIN ?? "").trim());
-}
+export { directGarminLogin } from "./direct-login-flag";
 
 /** A made-up origin: requests to it never touch the network, see localWorkerFetch. */
 export const LOCAL_WORKER_URL = "http://garmin-sso.local";
