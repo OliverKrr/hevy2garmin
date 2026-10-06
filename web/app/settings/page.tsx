@@ -3,6 +3,7 @@ import { SettingsForm } from "@/components/settings-form";
 import { DangerZone } from "@/components/danger-zone";
 import { SessionsCard } from "@/components/sessions-card";
 import { ScanDuplicates } from "@/components/scan-duplicates";
+import { serverSyncSchedule } from "@/lib/server-schedule";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -201,6 +202,7 @@ export default async function SettingsPage() {
         <h2 className="mb-3 text-lg font-semibold text-text">Configuration</h2>
         <SettingsForm
           githubTokenSet={data.platforms.some((r) => r.platform === "github" && r.status === "active")}
+          serverSchedule={serverSyncSchedule()}
           autoSyncEnabled={Boolean(autoSync.enabled)}
           autoSyncInterval={Number(autoSync.interval_minutes) || 120}
           hrFusionEnabled={hrFusion.enabled == null ? true : Boolean(hrFusion.enabled)}
