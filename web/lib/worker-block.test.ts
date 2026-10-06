@@ -99,8 +99,8 @@ describe("inventory of Worker addresses (fails on a new one)", () => {
    * H2G_DIRECT_GARMIN_LOGIN (or prove the block covers it), then add it here.
    */
   const KNOWN: Record<string, string> = {
-    "components/connect-garmin.tsx hevy2garmin-exchange-di.gkos.workers.dev":
-      "manual-ticket exchange; with directLogin it posts to /api/garmin-ticket-exchange instead",
+    "components/connect-garmin.tsx garmin-auth-sso.gkos.workers.dev":
+      "manual-ticket exchange (upstream #679 moved it to the shared Worker); with directLogin it posts to /api/garmin-ticket-exchange instead",
     "node_modules/garmin-auth/dist/sso-worker.js garmin-auth-sso.gkos.workers.dev":
       "default login Worker; lib/garmin-login-worker.ts never uses it while the flag is on",
     "node_modules/garmin-auth/dist/sso-worker.d.ts garmin-auth-sso.gkos.workers.dev": "type declaration of the same default",
