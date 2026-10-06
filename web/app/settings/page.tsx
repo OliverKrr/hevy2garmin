@@ -3,6 +3,10 @@ import { SettingsForm } from "@/components/settings-form";
 import { DangerZone } from "@/components/danger-zone";
 import { SessionsCard } from "@/components/sessions-card";
 import { ScanDuplicates } from "@/components/scan-duplicates";
+import { headers } from "next/headers";
+import { authEnabled } from "@/lib/auth";
+import { PROXY_SECRET_HEADER, proxySecretMatches } from "@/lib/proxy-secret";
+import { serverSyncSchedule } from "@/lib/server-schedule";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -122,6 +126,7 @@ function StatusPill({ status }: { status: string }) {
 }
 
 export default async function SettingsPage() {
+  const vouchedByProxy = await proxySecretMatches((await headers()).get(PROXY_SECRET_HEADER));
   const data = await loadSettings();
   const cfg = (key: string): Record<string, unknown> =>
     data.config.find((c) => c.key === key)?.value ?? {};
@@ -201,6 +206,7 @@ export default async function SettingsPage() {
         <h2 className="mb-3 text-lg font-semibold text-text">Configuration</h2>
         <SettingsForm
           githubTokenSet={data.platforms.some((r) => r.platform === "github" && r.status === "active")}
+          serverSchedule={serverSyncSchedule()}
           autoSyncEnabled={Boolean(autoSync.enabled)}
           autoSyncInterval={Number(autoSync.interval_minutes) || 120}
           hrFusionEnabled={hrFusion.enabled == null ? true : Boolean(hrFusion.enabled)}
@@ -267,11 +273,14 @@ export default async function SettingsPage() {
         )}
       </section>
 
-      {/* Sessions & security */}
-      <section className="mt-8">
-        <h2 className="mb-3 text-lg font-semibold text-text">Sessions &amp; security</h2>
-        <SessionsCard />
-      </section>
+      {/* Sessions & security. Fork: hidden when the trusted proxy signed this request in and
+          the app has no password, because then there are no dashboard sessions to revoke. */}
+      {(authEnabled() || !vouchedByProxy) && (
+        <section className="mt-8">
+          <h2 className="mb-3 text-lg font-semibold text-text">Sessions &amp; security</h2>
+          <SessionsCard />
+        </section>
+      )}
 
       {/* Maintenance */}
       <section className="mt-8">
