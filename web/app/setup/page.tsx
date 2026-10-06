@@ -1,5 +1,7 @@
 import { getDb } from "@/lib/db";
+import { headers } from "next/headers";
 import { authEnabled, productionRuntime } from "@/lib/auth";
+import { PROXY_SECRET_HEADER, proxySecretMatches } from "@/lib/proxy-secret";
 import { loadGarminConnection, loadHevyConnection, type Connection } from "@/lib/connections";
 import { ConnectHevy } from "@/components/connect-hevy";
 import { ConnectGarmin } from "@/components/connect-garmin";
@@ -116,7 +118,12 @@ function SetPasswordFirst() {
 }
 
 export default async function SetupPage() {
-  if (productionRuntime() && !authEnabled()) return <SetPasswordFirst />;
+  // Fork: a request the trusted proxy vouched for is signed in by the proxy's
+  // own login, so it needs no dashboard password. Checked on this request, not
+  // just "is a secret configured": /setup is served without a password, so a
+  // client that bypasses the proxy reaches it too and must still see the gate.
+  const vouched = await proxySecretMatches((await headers()).get(PROXY_SECRET_HEADER));
+  if (productionRuntime() && !authEnabled() && !vouched) return <SetPasswordFirst />;
   const data = await loadSetup();
   const hevyConnected = data.hevy.connected;
   const garminConnected = data.garmin.connected;
