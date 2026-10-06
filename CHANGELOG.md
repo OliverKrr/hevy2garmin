@@ -14,6 +14,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The setup page and the dashboard showed Hevy as "Not connected" when the key came from `HEVY_API_KEY`, though the sync used it. The badge now counts a key from the environment or the saved row, and a key Hevy rejected still shows as disconnected: for an environment key, which has no row to mark, a row holding only the status is written, never the key (#681).
 - The webhook compares the `CRON_SECRET` bearer in constant time (#656).
 - The README said the cron route is `POST /api/cron/sync`. It is `GET`; a POST answers 405. The Self-hosting section now shows the call and says that `GITHUB_PAT` plus `GITHUB_REPO` send the run to GitHub Actions instead (#657).
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
