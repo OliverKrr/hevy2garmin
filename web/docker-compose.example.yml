@@ -47,6 +47,9 @@ services:
       # Optional ones from .env.example (INTERVALS_API_KEY, INTERVALS_ATHLETE_ID, ...)
       # go here as well. Leave GITHUB_PAT and GITHUB_REPO unset: with both set,
       # /api/cron/sync hands the run to GitHub Actions instead of syncing here.
+      # What the dashboard shows as auto-sync, instead of the toggle that drives
+      # GitHub Actions. Keep it in step with SYNC_INTERVAL_SECONDS below.
+      H2G_SERVER_SYNC_SCHEDULE: ${H2G_SERVER_SYNC_SCHEDULE:-every 2 hours}
 
   # Auto-sync. The web app has no timer of its own; something has to call
   # GET /api/cron/sync with the cron secret. Every 2 hours by default, which
