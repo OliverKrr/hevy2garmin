@@ -30,30 +30,30 @@ export function generateDescription(
     for (const ex of exercises) {
       const name = (ex.title as string) || (ex.name as string) || "Unknown";
       const allSets = (ex.sets as Array<Record<string, unknown>>) || [];
-      const normal = allSets.filter((s) => s.type === "normal");
+      const working = allSets.filter((s) => s.type !== "warmup");
       const warmup = allSets.filter((s) => s.type === "warmup");
-      if (normal.length) {
-        const nLabel = normal.length === 1 ? "set" : "sets";
-        const hasDistance = normal.some((s) => s.distance_meters);
-        const hasDuration = normal.some((s) => s.duration_seconds);
-        const hasWeight = normal.some((s) => s.weight_kg || s.weight);
+      if (working.length) {
+        const nLabel = working.length === 1 ? "set" : "sets";
+        const hasDistance = working.some((s) => s.distance_meters);
+        const hasDuration = working.some((s) => s.duration_seconds);
+        const hasWeight = working.some((s) => s.weight_kg || s.weight);
         if (hasDistance || (hasDuration && !hasWeight)) {
-          const totalDist = normal.reduce((a, s) => a + (Number(s.distance_meters) || 0), 0);
-          const totalDur = normal.reduce((a, s) => a + (Number(s.duration_seconds) || 0), 0);
-          const parts = [`${normal.length} ${nLabel}`];
+          const totalDist = working.reduce((a, s) => a + (Number(s.distance_meters) || 0), 0);
+          const totalDur = working.reduce((a, s) => a + (Number(s.duration_seconds) || 0), 0);
+          const parts = [`${working.length} ${nLabel}`];
           if (totalDist > 0) parts.push(`${(totalDist / 1000).toFixed(1)}km`);
           if (totalDur > 0) parts.push(`${Math.floor(totalDur / 60)}min`);
           lines.push(`• ${name}: ${parts.join(" · ")}`);
         } else {
-          const weights = normal
+          const weights = working
             .map((s) => (s.weight_kg ?? s.weight) as number | undefined)
             .filter((w): w is number => w != null);
-          const reps = normal
+          const reps = working
             .map((s) => s.reps as number | undefined)
             .filter((r): r is number => r != null);
           const topWeight = weights.length ? Math.max(...weights) : 0;
           const topReps = reps.length ? Math.max(...reps) : 0;
-          lines.push(`• ${name}: ${normal.length} ${nLabel} · ${topWeight.toFixed(1)}kg × ${topReps}`);
+          lines.push(`• ${name}: ${working.length} ${nLabel} · ${topWeight.toFixed(1)}kg × ${topReps}`);
         }
       } else if (warmup.length) {
         const sLabel = warmup.length === 1 ? "set" : "sets";
