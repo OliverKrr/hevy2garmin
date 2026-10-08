@@ -15,13 +15,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- The activity description counts failure and drop sets as working sets, as the FIT file already does. Before, only `normal` sets were counted, and an exercise logged with only failure sets was missing from the description (#689).
-- Daily heart rate is no longer always empty. The display name the wellness endpoint is keyed by was read from `/userprofile-service/userprofile/profile`, which Garmin now answers with 404, so every workout the watch did not record as an activity synced without HR and nothing said why. The name now comes from `/userprofile-service/socialProfile`, and when there is none the unkeyed `dailyHeartRate?date=` path is asked instead of giving up (#686).
 - The setup page and the dashboard showed Hevy as "Not connected" when the key came from `HEVY_API_KEY`, though the sync used it. The badge now counts a key from the environment or the saved row, and a key Hevy rejected still shows as disconnected: for an environment key, which has no row to mark, a row holding only the status is written, never the key (#681).
 - The webhook compares the `CRON_SECRET` bearer in constant time (#656).
 - The README said the cron route is `POST /api/cron/sync`. It is `GET`; a POST answers 405. The Self-hosting section now shows the call and says that `GITHUB_PAT` plus `GITHUB_REPO` send the run to GitHub Actions instead (#657).
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
 - The Docker section of the README mounts both folders for `init`, recommends named volumes, explains uid 999 for host folders, and tells docker-compose users how to reuse their old volumes (#651, #652).
+
+## [0.11.1 (npm)] - 2026-10-08
+
+### Fixed
+
+- The activity description counts failure and drop sets as working sets, as the FIT file already does. Before, only `normal` sets were counted, and an exercise logged with only failure sets was missing from the description (#689).
+- Daily heart rate is no longer always empty. The display name the wellness endpoint is keyed by was read from `/userprofile-service/userprofile/profile`, which Garmin now answers with 404, so every workout the watch did not record as an activity synced without HR and nothing said why. The name now comes from `/userprofile-service/socialProfile`, and when there is none the unkeyed `dailyHeartRate?date=` path is asked instead of giving up (#686).
 
 ## [0.11.0 (npm)] - 2026-10-03
 
