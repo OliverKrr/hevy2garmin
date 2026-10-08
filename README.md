@@ -338,7 +338,7 @@ The compose file starts three containers:
 
 - `db`, Postgres 16, with its data in the `db_data` volume. It is the only state; the web container holds none.
 - `web`, the dashboard on port 8096, bound to `127.0.0.1`. It runs as the unprivileged `node` user, and its health check is `GET /api/version`, which needs neither a session nor the database.
-- `cron`, which calls `GET /api/cron/sync` every two hours (`SYNC_INTERVAL_SECONDS` in `.env` changes it). Without something calling that route, a self-hosted dashboard only syncs when you press **Sync Now** or Hevy sends a webhook.
+- `cron`, which calls `GET /api/cron/sync` every two hours (`SYNC_INTERVAL_SECONDS` in `.env` changes it). Without something calling that route, a self-hosted dashboard only syncs when you press **Sync Now** or Hevy sends a webhook. The `web` service sets `H2G_SERVER_SYNC_SCHEDULE` to match, so the dashboard shows this schedule; change both together.
 
 To run the image without compose, build it with `docker build -t hevy2garmin-web web/` and pass the same variables with `-e`, pointing `DATABASE_URL` at your Postgres. The image builds and runs on amd64 and arm64. Build it on the machine that runs it: an emulated cross-build under QEMU crashes in Next's build step. To have `/api/version` report the commit you built, set `HEVY2GARMIN_COMMIT_SHA` when you start the container.
 
@@ -359,6 +359,8 @@ The cron route is `GET /api/cron/sync` with the same bearer. Vercel calls it dai
 ```
 
 Leave `GITHUB_PAT` and `GITHUB_REPO` unset on a self-hosted box. With both set, the route hands the run to the GitHub Actions workflow on your fork instead of syncing on the server.
+
+The dashboard's **Auto-sync** toggle and interval schedule that GitHub Actions workflow, so on a self-hosted box they change nothing. Set `H2G_SERVER_SYNC_SCHEDULE` to how often your scheduler runs, in words (`every 2 hours`): the dashboard and Settings then show that schedule in place of the toggle, the interval and the GitHub token, and **Sync all** says it runs on the server.
 
 ### Removing duplicates from intervals.icu
 

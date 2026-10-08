@@ -26,7 +26,7 @@ interface BatchResult {
  * sync engine. Because a batch uploads many activities, it is guarded behind an
  * inline confirmation, and the server independently requires authorization.
  */
-export function BatchSync({ ready }: { ready: boolean }) {
+export function BatchSync({ ready, onServer = false }: { ready: boolean; onServer?: boolean }) {
   const router = useRouter();
   const [result, setResult] = useState<BatchResult | null>(null);
   const [busy, setBusy] = useState<null | "preview" | "live">(null);
@@ -64,7 +64,7 @@ export function BatchSync({ ready }: { ready: boolean }) {
           <h2 className="text-lg font-semibold text-text">Sync everything</h2>
           <p className="mt-0.5 text-sm text-text-secondary">
             Preview all counts what would sync. Sync all uploads every pending
-            workout (via the scheduled job when deployed).
+            workout{onServer ? " now, on this server" : " (via the scheduled job when deployed)"}.
           </p>
         </div>
         <div className="flex items-center gap-2">
