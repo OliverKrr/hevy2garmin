@@ -569,19 +569,19 @@ def generate_description(
         for ex in exercises:
             name = ex.get("title") or ex.get("name", "Unknown")
             all_sets = ex.get("sets", [])
-            normal = [s for s in all_sets if s.get("type") == "normal"]
+            working = [s for s in all_sets if s.get("type") != "warmup"]
             warmup = [s for s in all_sets if s.get("type") == "warmup"]
-            if normal:
-                n_label = "set" if len(normal) == 1 else "sets"
+            if working:
+                n_label = "set" if len(working) == 1 else "sets"
                 # Check if this is a cardio exercise (has distance or duration, no weight/reps)
-                has_distance = any(s.get("distance_meters") for s in normal)
-                has_duration = any(s.get("duration_seconds") for s in normal)
-                has_weight = any(s.get("weight_kg") or s.get("weight") for s in normal)
+                has_distance = any(s.get("distance_meters") for s in working)
+                has_duration = any(s.get("duration_seconds") for s in working)
+                has_weight = any(s.get("weight_kg") or s.get("weight") for s in working)
                 if has_distance or (has_duration and not has_weight):
                     # Cardio: show distance and/or duration
-                    total_dist = sum(s.get("distance_meters", 0) or 0 for s in normal)
-                    total_dur = sum(s.get("duration_seconds", 0) or 0 for s in normal)
-                    parts = [f"{len(normal)} {n_label}"]
+                    total_dist = sum(s.get("distance_meters", 0) or 0 for s in working)
+                    total_dur = sum(s.get("duration_seconds", 0) or 0 for s in working)
+                    parts = [f"{len(working)} {n_label}"]
                     if total_dist > 0:
                         parts.append(f"{total_dist / 1000:.1f}km")
                     if total_dur > 0:
@@ -590,14 +590,14 @@ def generate_description(
                 else:
                     weights = [
                         w
-                        for s in normal
+                        for s in working
                         if (w := (s.get("weight_kg") or s.get("weight"))) is not None
                     ]
-                    reps = [r for s in normal if (r := s.get("reps")) is not None]
+                    reps = [r for s in working if (r := s.get("reps")) is not None]
                     top_weight = max(weights) if weights else 0
                     top_reps = max(reps) if reps else 0
                     lines.append(
-                        f"• {name}: {len(normal)} {n_label} · {top_weight:.1f}kg × {top_reps}"
+                        f"• {name}: {len(working)} {n_label} · {top_weight:.1f}kg × {top_reps}"
                     )
             elif warmup:
                 s_label = "set" if len(warmup) == 1 else "sets"

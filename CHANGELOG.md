@@ -15,6 +15,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The activity description counts failure and drop sets as working sets, as the FIT file already does. Before, only `normal` sets were counted, and an exercise logged with only failure sets was missing from the description (#689).
 - Daily heart rate is no longer always empty. The display name the wellness endpoint is keyed by was read from `/userprofile-service/userprofile/profile`, which Garmin now answers with 404, so every workout the watch did not record as an activity synced without HR and nothing said why. The name now comes from `/userprofile-service/socialProfile`, and when there is none the unkeyed `dailyHeartRate?date=` path is asked instead of giving up (#686).
 - The setup page and the dashboard showed Hevy as "Not connected" when the key came from `HEVY_API_KEY`, though the sync used it. The badge now counts a key from the environment or the saved row, and a key Hevy rejected still shows as disconnected: for an environment key, which has no row to mark, a row holding only the status is written, never the key (#681).
 - The webhook compares the `CRON_SECRET` bearer in constant time (#656).
