@@ -94,6 +94,14 @@ export async function isSynced(hevyId: string, sql: Sql = getDb()): Promise<bool
   return rows.length > 0;
 }
 
+/** The Garmin activity a synced workout's terminal row points at, or null. */
+export async function storedGarminActivityId(hevyId: string, sql: Sql = getDb()): Promise<string | null> {
+  const rows = await sql`
+    SELECT garmin_activity_id FROM synced_workouts WHERE hevy_id = ${hevyId} LIMIT 1
+  `;
+  return (rows[0]?.garmin_activity_id as string | null | undefined) ?? null;
+}
+
 /** COUNT(*) over synced_workouts. Mirrors get_synced_count(). */
 export async function getSyncedCount(sql: Sql = getDb()): Promise<number> {
   const rows = await sql`SELECT COUNT(*)::int AS cnt FROM synced_workouts`;
