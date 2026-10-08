@@ -213,8 +213,8 @@ export async function mergeIntoWatchActivity(
   // edited a workout in Hevy and re-synced got the title and description
   // updated and the sets left as they were, because the fall-through does
   // rename and describe only. Python merges here too (`merge.py:450-451`), and
-  // the read-back further down is the safeguard that comes with it (#597).
-  const isWatch = isWatchRecorded(act);
+  // the read-back in `pushSetsIntoActivity` is the safeguard that comes with it
+  // (#597).
   if (!IN_PLACE.has(strategy)) {
     return { merged: false, activityId: act.activityId, strategy, replaceWatchActivity: true };
   }
@@ -222,6 +222,29 @@ export async function mergeIntoWatchActivity(
     // Nothing to push. The caller writes the description, as it already does.
     return { merged: true, activityId: act.activityId, strategy, setsPushed: 0 };
   }
+
+  return pushSetsIntoActivity(gateway, workout, act, options, deps);
+}
+
+/**
+ * Push a workout's sets into one known Garmin activity, with the backup before
+ * the PUT and the read-back after it.
+ *
+ * The second half of `mergeIntoWatchActivity`, callable on its own by a resync,
+ * which already knows its activity and must not search for one. `strategy`
+ * here only decides the read-back: under `merge`, a watch activity is not read
+ * back, and every other activity is.
+ */
+export async function pushSetsIntoActivity(
+  gateway: GarminGateway,
+  workout: TimedWorkout & { exercises?: unknown[] },
+  act: CandidateActivity,
+  options: MergeOptions = {},
+  deps: MergeDeps = {},
+): Promise<MergeOutcome> {
+  const strategy = options.strategy ?? DEFAULT_WATCH_STRATEGY;
+  const store = deps.store;
+  const isWatch = isWatchRecorded(act);
 
   const startTime = act.startTimeGMT || act.startTimeLocal || "";
   const durationS = act.duration ?? 0;

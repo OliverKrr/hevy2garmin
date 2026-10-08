@@ -12,7 +12,7 @@ import type { GarminClient } from "garmin-auth";
 import {
   findActivityByStartTime, renameActivity, setDescription, uploadFit,
   getActivitiesByDate, getActivityExerciseSets, pushExerciseSets,
-  deleteActivity, downloadActivityFit, getDailyHeartRate,
+  deleteActivity, downloadActivityFit, getDailyHeartRate, getActivity,
   type UploadResult,
 } from "../garmin";
 import type { CandidateActivity } from "../merge-match";
@@ -64,6 +64,13 @@ export interface GarminGateway {
    * watch never recorded as an activity.
    */
   dailyHeartRate?(date: string): Promise<Array<[number, number | null]>>;
+  /**
+   * READ: one activity by id, or null when Garmin no longer has it. A resync
+   * starts here, from the id the ledger stored, instead of searching by time.
+   * Optional so a consumer's own gateway keeps compiling; a resync through a
+   * gateway without it stops with an error.
+   */
+  activity?(activityId: number): Promise<CandidateActivity | null>;
 }
 
 /**
@@ -95,6 +102,7 @@ export function garminGateway(client: GarminClient, options: RateLimitOptions = 
     deleteActivity: (activityId) => limit(() => deleteActivity(client, activityId)),
     activityFit: (activityId) => limit(() => downloadActivityFit(client, activityId)),
     dailyHeartRate: (date) => limit(() => getDailyHeartRate(client, date)),
+    activity: (activityId) => limit(() => getActivity(client, activityId)),
   };
 }
 

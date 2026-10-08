@@ -23,7 +23,9 @@ export type DedupDecision =
   | "claim_lost" // layer 3: another worker holds the pending claim — deferred
   | "within_grace" // too new: the watch may not have uploaded its own activity yet — deferred
   | "no_candidates" // nothing left to sync
-  | "no_start_time"; // workout has no start_time; can't run the layer-2 lookup safely
+  | "no_start_time" // workout has no start_time; can't run the layer-2 lookup safely
+  | "stored_activity" // resync: the activity the ledger stored is the target; nothing is looked up by time
+  | "not_synced"; // resync asked for a workout with no terminal row — refused
 
 /** Compact FIT stats surfaced to the caller (no bytes). */
 export interface FitStats {
@@ -52,6 +54,8 @@ export interface FitStats {
  * - `merge_pending` merge-only was asked for and no watch activity has appeared
  *   yet, so the workout is deliberately left unsynced rather than uploaded.
  *   Nothing was written to Garmin or the store; the next attempt starts clean.
+ * - `target_missing` a resync's stored Garmin activity no longer exists.
+ *   Nothing was uploaded or written; the ledger row is left as it was.
  *
  * `error` and `none` stay for now because the web routes count them. Narrowing
  * those is a separate change.
@@ -67,7 +71,8 @@ export interface SyncOneResult {
     | "processing"
     | "failed"
     | "needs_review"
-    | "merge_pending";
+    | "merge_pending"
+    | "target_missing";
   dryRun: boolean;
   /** In dry-run: true when a live run WOULD upload a fresh FIT. */
   wouldUpload: boolean;
@@ -163,8 +168,29 @@ export interface SyncOneOptions {
    * Sync a SPECIFIC workout by its Hevy id instead of the next candidate. It
    * must still be an unsynced candidate (all three dedup layers still gate the
    * upload); if it is not among the candidates the result is `no_candidates`.
+   * With `targetActivityId` it must instead be synced; see there.
    */
   targetHevyId?: string;
+  /**
+   * Resync: push the current Hevy version of `targetHevyId`, which must
+   * already be synced, into this Garmin activity, the one its ledger row
+   * stored. It replaces the start-time lookup, so nothing is searched for by
+   * time, uploaded or deleted, and no claim is taken.
+   *
+   * The sets are pushed with the same backup and read-back as a merge, then
+   * the activity is renamed and described and the ledger row rewritten. Under
+   * the `describe` watch strategy only the name and description change. A
+   * `replace` activity is our own named upload by now and is treated as one.
+   *
+   * Every outcome other than `synced` and `dry_run` leaves Garmin and the
+   * ledger as they were. `target_missing` means Garmin no longer has the
+   * activity. A workout that is not synced is `skipped` as `not_synced`. One
+   * Hevy no longer lists, a failed push, or Garmin dropping the exercise
+   * names (the previous sets are restored) is an `error`. None of them is
+   * `no_candidates`, so a caller can tell a resync apart from an engine that
+   * predates this option and ignored it. A dry run still reads the activity.
+   */
+  targetActivityId?: number;
   /**
    * Hold back a workout that ended less than `graceMinutes` ago, so the watch
    * has time to upload its own activity first. DEFAULT false: an unattended run
