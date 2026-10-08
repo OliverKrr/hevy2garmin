@@ -22,7 +22,8 @@ vi.mock("./db", () => ({
       const text = strings.join("?");
       if (text.includes("UPDATE platform_credentials")) {
         h.writes.push(String(values[0]));
-        return Promise.resolve(Object.assign([], { count: h.updateCount }));
+        // getDb() returns a plain array of rows, never the driver's `count`.
+        return Promise.resolve(Array.from({ length: h.updateCount }, () => ({ platform: "hevy" })));
       }
       if (text.includes("INSERT INTO platform_credentials")) h.inserts.push(String(values[0]));
       if (text.includes("SELECT credentials")) {
