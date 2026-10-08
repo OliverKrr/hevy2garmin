@@ -108,9 +108,21 @@ async function withKeyStatus<T>(run: () => Promise<T>): Promise<T> {
 async function setHevyKeyStatus(status: "active" | "disconnected"): Promise<void> {
   try {
     const sql = getDb();
-    await sql`
+    // RETURNING, not the driver's row count: getDb() hands back a plain array,
+    // so a `count` property never survives to here.
+    const updated = await sql`
       UPDATE platform_credentials SET status = ${status} WHERE platform = 'hevy'
+      RETURNING platform
     `;
+    // A key from HEVY_API_KEY has no row to mark, so a rejected one would stay
+    // invisible. Write a row that holds only the status, never the key.
+    if (updated.length === 0 && process.env.HEVY_API_KEY?.trim()) {
+      await sql`
+        INSERT INTO platform_credentials (platform, auth_type, credentials, status)
+        VALUES ('hevy', 'api_key', '{}'::jsonb, ${status})
+        ON CONFLICT (platform) DO NOTHING
+      `;
+    }
   } catch {
     // No database, or no row yet. Either way the sync's own outcome stands.
   }

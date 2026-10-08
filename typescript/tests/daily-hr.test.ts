@@ -73,7 +73,7 @@ function client(routes: Record<string, unknown>, spy = vi.fn()): GarminClient {
 }
 
 describe("getDailyHeartRate", () => {
-  const PROFILE = "/userprofile-service/userprofile/profile";
+  const PROFILE = "/userprofile-service/socialProfile";
   const WELLNESS = "/wellness-service/wellness/dailyHeartRate";
 
   it("reads the display name the wellness endpoint is keyed by, then the readings", async () => {
@@ -113,10 +113,27 @@ describe("getDailyHeartRate", () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
-  it("returns nothing when the profile call fails", async () => {
-    const c = client({ [PROFILE]: new Error("401") });
-    expect(await getDailyHeartRate(c, "2026-09-15")).toEqual([]);
+  it("asks the unkeyed path when the profile call fails, instead of giving up", async () => {
+    const seen = vi.fn();
+    const c = client(
+      { [PROFILE]: new Error("404"), [WELLNESS]: { heartRateValues: [[1, 60]] } },
+      seen,
+    );
+    expect(await getDailyHeartRate(c, "2026-09-15")).toEqual([[1, 60]]);
     expect(await getDisplayName(c)).toBeNull();
+    expect(seen.mock.calls[1][0]).toBe(`${WELLNESS}?date=2026-09-15`);
+  });
+
+  it("no longer reads the retired userprofile/profile path", async () => {
+    const seen = vi.fn();
+    const c = client(
+      { [PROFILE]: { displayName: "abc-123" }, [WELLNESS]: { heartRateValues: [] } },
+      seen,
+    );
+    await getDailyHeartRate(c, "2026-09-15");
+    expect(seen.mock.calls.map((x) => String(x[0]))).not.toContain(
+      "/userprofile-service/userprofile/profile",
+    );
   });
 
   it("returns nothing when the wellness call fails, rather than breaking the sync", async () => {

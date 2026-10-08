@@ -218,6 +218,10 @@ export async function downloadActivityFit(
 /**
  * The Garmin display name, which the wellness endpoints are keyed by.
  *
+ * Read from `socialProfile`. `/userprofile-service/userprofile/profile` used to
+ * carry it too, but Garmin now answers that path with 404, which left every
+ * daily HR lookup empty without a word.
+ *
  * Cached per client: it does not change, and a sync would otherwise fetch the
  * same profile on every workout.
  */
@@ -228,7 +232,7 @@ export async function getDisplayName(client: GarminClient): Promise<string | nul
   let name: string | null = null;
   try {
     const profile = await client.connectapi<{ displayName?: string }>(
-      "/userprofile-service/userprofile/profile",
+      "/userprofile-service/socialProfile",
     );
     name = profile?.displayName ?? null;
   } catch {
@@ -258,12 +262,15 @@ export async function getDailyHeartRate(
 ): Promise<DailyHeartRateValue[]> {
   const day = String(date).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
+  // Keyed by the display name when there is one. Without it, the unkeyed path
+  // serves the same readings for the signed-in user, so a profile lookup that
+  // fails costs nothing instead of the whole series.
   const who = await getDisplayName(client);
-  if (!who) return [];
+  const path = who
+    ? `/wellness-service/wellness/dailyHeartRate/${encodeURIComponent(who)}?date=${day}`
+    : `/wellness-service/wellness/dailyHeartRate?date=${day}`;
   try {
-    const data = await client.connectapi<{ heartRateValues?: unknown }>(
-      `/wellness-service/wellness/dailyHeartRate/${encodeURIComponent(who)}?date=${day}`,
-    );
+    const data = await client.connectapi<{ heartRateValues?: unknown }>(path);
     const values = data?.heartRateValues;
     if (!Array.isArray(values)) return [];
     return values.filter(
