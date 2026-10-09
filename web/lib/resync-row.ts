@@ -1,6 +1,6 @@
 /**
- * Resync on a workout row (#701): which rows offer it, and what the row says
- * afterwards.
+ * Resync on a workout row (#701): which rows offer it, what the row says
+ * afterwards, and the "Edited in Hevy" badge that points at it.
  */
 
 /**
@@ -30,4 +30,30 @@ export function resyncOutcome(httpOk: boolean, body: { status?: unknown; error?:
     return { kind: "missing", text: "This activity is no longer on Garmin, so nothing was changed." };
   }
   return { kind: "error", text: error ?? `Resync did not complete (${String(body.status ?? "no status")}).` };
+}
+
+/**
+ * The "Edited in Hevy" badge: on a row the edited list names, and only where
+ * Resync is offered, since Resync is what the badge asks for.
+ */
+export function showsEditedBadge(
+  row: { kind: string; state: string; garmin_activity_id: string | null; hevy_id: string },
+  editedIds: ReadonlySet<string>,
+): boolean {
+  return editedIds.has(row.hevy_id) && canResync(row);
+}
+
+/**
+ * The edited list after a resync of `hevyId`: without it when the resync
+ * succeeded, since Garmin now has the Hevy version; unchanged otherwise.
+ */
+export function editedAfterResync(
+  editedIds: ReadonlySet<string>,
+  hevyId: string,
+  outcome: ResyncOutcome,
+): ReadonlySet<string> {
+  if (outcome.kind !== "success" || !editedIds.has(hevyId)) return editedIds;
+  const next = new Set(editedIds);
+  next.delete(hevyId);
+  return next;
 }

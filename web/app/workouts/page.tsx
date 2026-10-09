@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import { WorkoutRow } from "@/components/workout-row";
+import { WorkoutList } from "@/components/workout-list";
 import { CandidatesList } from "@/components/candidates-list";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
@@ -135,11 +135,7 @@ export default async function WorkoutsPage() {
           </p>
         </div>
       ) : (
-        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface-elevated">
-          {data.items.map((w) => (
-            <WorkoutRow key={w.hevy_id} item={w} />
-          ))}
-        </ul>
+        <WorkoutList items={data.items} />
       )}
     </main>
   );

@@ -85,9 +85,19 @@ const actionBtn =
  * Rows this app synced, with a Garmin activity, also get "Resync", which
  * pushes the current Hevy version into that activity in place (#701). It is the one
  * action here that writes to Garmin, so it asks first, and it reports its
- * outcome on the row: done, the activity is gone, or an error.
+ * outcome on the row: done, the activity is gone, or an error. `edited` puts
+ * the "Edited in Hevy" badge beside it, and `onResyncOutcome` tells the list
+ * how the resync went, so a success can take the badge away.
  */
-export function WorkoutRow({ item }: { item: WorkoutItem }) {
+export function WorkoutRow({
+  item,
+  edited = false,
+  onResyncOutcome,
+}: {
+  item: WorkoutItem;
+  edited?: boolean;
+  onResyncOutcome?: (hevyId: string, outcome: ResyncOutcome) => void;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [samples, setSamples] = useState<number[] | null | undefined>(undefined); // undefined = not fetched
@@ -255,6 +265,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
       const d = (await res.json().catch(() => ({}))) as { status?: unknown; error?: unknown };
       const outcome = resyncOutcome(res.ok, d);
       setResyncResult(outcome);
+      onResyncOutcome?.(item.hevy_id, outcome);
       if (outcome.kind === "success") {
         setResyncConfirm(false);
         router.refresh();
@@ -306,7 +317,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
             {item.detail && <span className="text-text-secondary"> · {item.detail}</span>}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {canResolve && (
             <button type="button" onClick={() => setResolving((v) => !v)} className={actionBtn}>
               {resolving ? "Cancel" : "Resolve"}
@@ -316,6 +327,14 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
             <button type="button" onClick={toggle} className={actionBtn}>
               {open ? "Hide HR" : "HR"}
             </button>
+          )}
+          {edited && (
+            <span
+              className="inline-block whitespace-nowrap rounded-full bg-warm/15 px-2.5 py-0.5 text-xs font-medium text-warm"
+              title="Changed in Hevy after it synced. Resync to update Garmin."
+            >
+              Edited in Hevy
+            </span>
           )}
           {canResync(item) && (
             <button
