@@ -44,14 +44,6 @@ export type {
 export { generateDescription } from "hevy2garmin";
 
 export interface SyncOneOptions extends EngineSyncOneOptions {
-  /**
-   * The engine's resync target. Declared here as well so this app builds
-   * against a pinned engine that predates it; such an engine ignores the
-   * option and answers `no_candidates`, which the resync route turns into an
-   * error (see its route). Drop this line once the pin reaches the release
-   * that has it.
-   */
-  targetActivityId?: number;
   /** Test seam: replace the Hevy fetch. Default: fetchAllWorkouts(). */
   fetchWorkouts?: () => Promise<HevyWorkout[]>;
   /** Test seam: replace the Garmin client. Default: getGarminClient(). */
