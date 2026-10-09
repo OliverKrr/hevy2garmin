@@ -394,6 +394,21 @@ describe("resync identifies the activity by its id, never by time", () => {
     expect(gw.activitiesByDate).toHaveBeenCalledWith("2026-08-04", "2026-08-06");
   });
 
+  it("reads the day from Garmin's real single-activity start format", async () => {
+    // As Garmin sent it for a real activity: a T, a one-digit fraction and no
+    // zone, with the local start three hours ahead.
+    gw.activity.mockResolvedValue({
+      activityId: ACTIVITY_ID,
+      startTimeGMT: "2026-10-09T06:55:56.0",
+      startTimeLocal: "2026-10-09T09:55:56.0",
+      duration: 5253.302,
+    });
+    gw.activitiesByDate.mockResolvedValue([listed({ startTimeGMT: "2026-10-09 06:55:56", duration: 5253.302 })]);
+    const r = await resync({ merge: MERGE });
+    expect(gw.activitiesByDate).toHaveBeenCalledWith("2026-10-08", "2026-10-10");
+    expect(r.status).toBe("synced");
+  });
+
   it("uses the workout's date when the read by id carries no start", async () => {
     gw.activity.mockResolvedValue({ activityId: ACTIVITY_ID });
     const r = await resync({ merge: MERGE });
