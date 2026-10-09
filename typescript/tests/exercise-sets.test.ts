@@ -239,6 +239,14 @@ describe("set timing comes from the user's settings", () => {
     return p.exerciseSets.map((s) => Math.round(s.duration));
   }
 
+  it("keeps the defaults for timing values passed as undefined (#703)", () => {
+    // The web settings loader used to pass all four keys with undefined for the
+    // ones never saved, which made every set time NaN and threw.
+    const undef = { workingSetS: undefined, warmupSetS: undefined, restSetsS: undefined, restExercisesS: undefined };
+    const p = buildExerciseSetsPayload(w as never, 1, START, 25 + 75 + 40 + 120 + 40, undefined, undef as never);
+    expect(p.exerciseSets.map((s) => Math.round(s.duration))).toEqual([25, 75, 40, 120, 40]);
+  });
+
   it("uses the documented defaults when the user changed nothing", () => {
     expect(durations()).toEqual([25, 75, 40, 120, 40]);
   });

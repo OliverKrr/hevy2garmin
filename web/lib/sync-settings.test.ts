@@ -81,6 +81,14 @@ describe("loadSyncSettings", () => {
     expect(s.merge.enabled).toBe(DEFAULT_SYNC_SETTINGS.merge.enabled);
   });
 
+  it("passes no undefined timing values to the engine when none were saved (#703)", async () => {
+    // An undefined value overrode the engine's default set time, so every merge
+    // built NaN timestamps and threw "Invalid time value".
+    const s = await loadSyncSettings(fakeSql());
+    expect(Object.values(s.merge.timing ?? {}).some((v) => v === undefined)).toBe(false);
+    expect(s.merge.timing).toEqual({});
+  });
+
   it("still returns defaults when the queries fail, rather than turning merge off", async () => {
     // A fresh fork's database has no app_cache yet. Reading that as "merge off"
     // would quietly give a new user the behaviour this whole track fixed.
