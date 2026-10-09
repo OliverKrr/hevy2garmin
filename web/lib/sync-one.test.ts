@@ -175,6 +175,12 @@ describe("sync start date", () => {
     expect((await fetchWith(null)).map((w) => w.id)).toEqual(["old", "new"]);
   });
 
+  it("does not limit a resync, whose workout is synced and may be older than the date", async () => {
+    const sql = makeSql({ sync_window: { start_date: "2026-09-01" } }) as never;
+    const deps = buildSyncDeps(sql, { fetchWorkouts: async () => [OLD] as never, targetActivityId: 4242 });
+    expect(((await deps.fetchWorkouts()) as Array<{ id: string }>).map((w) => w.id)).toEqual(["old"]);
+  });
+
   it("keeps everything when the stored value is not a date", async () => {
     // A bad value must never mean "hide everything": the user would see an
     // empty list with nothing to explain it.

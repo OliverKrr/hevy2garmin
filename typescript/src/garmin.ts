@@ -4,6 +4,7 @@
  */
 import { GarminClient, NATIVE_API_USER_AGENT, NATIVE_X_GARMIN_USER_AGENT } from "garmin-auth";
 import { toUtcDate } from "./match";
+import type { CandidateActivity } from "./merge-match";
 
 function nativeHeaders(token: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
@@ -178,6 +179,44 @@ export async function renameActivity(client: GarminClient, activityId: number, n
 /** Set an activity's description. */
 export async function setDescription(client: GarminClient, activityId: number, description: string): Promise<void> {
   await postJson(client, `/activity-service/activity/${activityId}`, { activityId, description });
+}
+
+/** The fields of Garmin's single-activity response that a merge reads. */
+interface ActivityDetail {
+  activityId?: number;
+  activityName?: string;
+  activityTypeDTO?: { typeKey?: string };
+  metadataDTO?: { manufacturer?: string };
+  summaryDTO?: { startTimeGMT?: string; startTimeLocal?: string; duration?: number };
+}
+
+/**
+ * One activity by id, in the shape the merge matcher reads, or null when
+ * Garmin answers 404. A resync takes only its existence and its start from
+ * this; everything else it needs comes from the activity list.
+ *
+ * The 404 is the one answer that means the activity is gone, so it is the only
+ * one turned into null. Anything else says nothing about whether the activity
+ * exists and is thrown, so a resync never reports a live activity as deleted
+ * because Garmin had a bad moment.
+ */
+export async function getActivity(client: GarminClient, activityId: number): Promise<CandidateActivity | null> {
+  const url = `https://connectapi.${client.domain}/activity-service/activity/${activityId}`;
+  const req = () => fetch(url, { headers: nativeHeaders(client.di_token!, { NK: "NT" }) });
+  let res = await req();
+  if (res.status === 401) { await client.refreshDiToken(); res = await req(); }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`get activity ${activityId} → ${res.status}`);
+  const d = (await res.json()) as ActivityDetail;
+  return {
+    activityId: d.activityId ?? activityId,
+    activityName: d.activityName,
+    activityType: d.activityTypeDTO ? { typeKey: d.activityTypeDTO.typeKey } : undefined,
+    manufacturer: d.metadataDTO?.manufacturer,
+    startTimeGMT: d.summaryDTO?.startTimeGMT,
+    startTimeLocal: d.summaryDTO?.startTimeLocal,
+    duration: d.summaryDTO?.duration,
+  };
 }
 
 /** Delete an activity. */

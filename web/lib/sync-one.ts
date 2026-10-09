@@ -44,6 +44,14 @@ export type {
 export { generateDescription } from "hevy2garmin";
 
 export interface SyncOneOptions extends EngineSyncOneOptions {
+  /**
+   * The engine's resync target. Declared here as well so this app builds
+   * against a pinned engine that predates it; such an engine ignores the
+   * option and answers `no_candidates`, which the resync route turns into an
+   * error (see its route). Drop this line once the pin reaches the release
+   * that has it.
+   */
+  targetActivityId?: number;
   /** Test seam: replace the Hevy fetch. Default: fetchAllWorkouts(). */
   fetchWorkouts?: () => Promise<HevyWorkout[]>;
   /** Test seam: replace the Garmin client. Default: getGarminClient(). */
@@ -70,7 +78,14 @@ export function buildSyncDeps(sql: Sql, options: SyncOneOptions = {}): SyncDeps 
       // Applied HERE, before the engine sees the list, so listCandidates and
       // syncOneWorkout both honour it without being told and without the engine
       // needing a release (#647).
-      const startDate = parseStartDate(await loadSyncStartDate(sql).catch(() => null));
+      //
+      // Not for a resync. The date chooses which workouts are sync candidates,
+      // and a resync's workout is already synced, possibly before the date was
+      // set. Hiding it would leave the engine nothing to resync from.
+      const startDate =
+        options.targetActivityId != null
+          ? null
+          : parseStartDate(await loadSyncStartDate(sql).catch(() => null));
       const workouts = withinSyncWindow(all, startDate);
       // The HR backup is looked up by id against the FULL list on purpose: a
       // workout outside the window is not a candidate, but one that was synced

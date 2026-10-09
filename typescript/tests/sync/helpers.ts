@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 import type { GarminGateway, MarkSyncedOpts, PendingRecord, PendingUpdate, SyncStore } from "../../src/sync";
+import type { CandidateActivity } from "../../src/merge-match";
 
 /**
  * An in-memory SyncStore whose every method is a vi.fn, so tests assert on
@@ -51,6 +52,8 @@ export function mockGateway() {
     putExerciseSets: vi.fn(async (_id: number, _payload: unknown) => {}),
     deleteActivity: vi.fn(async (_id: number) => {}),
     activityFit: vi.fn(async (_id: number) => null),
+    // Read only by a resync, which looks the stored activity up by id.
+    activity: vi.fn(async (_id: number) => null as CandidateActivity | null),
   } satisfies GarminGateway;
 }
 
