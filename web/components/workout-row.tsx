@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
-import { resyncOutcome, type ResyncOutcome } from "@/lib/resync-outcome";
+import { canResync, resyncOutcome, type ResyncOutcome } from "@/lib/resync-row";
 
 export interface WorkoutItem {
   hevy_id: string;
@@ -82,8 +82,8 @@ const actionBtn =
  * candidate again. All of these POST to DB-only routes (no Garmin call) and
  * refresh the list on success.
  *
- * Terminal rows with a Garmin activity also get "Resync", which pushes the
- * current Hevy version into that activity in place (#701). It is the one
+ * Rows this app synced, with a Garmin activity, also get "Resync", which
+ * pushes the current Hevy version into that activity in place (#701). It is the one
  * action here that writes to Garmin, so it asks first, and it reports its
  * outcome on the row: done, the activity is gone, or an error.
  */
@@ -103,7 +103,6 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
   const canHr = Boolean(item.garmin_activity_id);
   const canResolve = item.kind === "pending";
   const canUnsync = item.kind === "terminal";
-  const canResync = item.kind === "terminal" && Boolean(item.garmin_activity_id);
 
   async function toggle() {
     const next = !open;
@@ -318,7 +317,7 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
               {open ? "Hide HR" : "HR"}
             </button>
           )}
-          {canResync && (
+          {canResync(item) && (
             <button
               type="button"
               onClick={() => {

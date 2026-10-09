@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resyncOutcome } from "./resync-outcome";
+import { canResync, resyncOutcome } from "./resync-row";
 
 /**
  * What a workout row says after Resync (#701). Three outcomes the user acts on
@@ -36,5 +36,35 @@ describe("resyncOutcome", () => {
     });
     expect(resyncOutcome(true, {}).kind).toBe("error");
     expect(resyncOutcome(false, {}).kind).toBe("error");
+  });
+});
+
+/**
+ * Which rows offer Resync. Only a workout this app synced has an activity it
+ * can safely rewrite: a "Marked as synced" row points at whatever the user
+ * said, and a skipped one at nothing of ours.
+ */
+describe("canResync", () => {
+  const row = (state: string, garmin_activity_id: string | null = "4242", kind: "terminal" | "pending" = "terminal") => ({
+    kind,
+    state,
+    garmin_activity_id,
+  });
+
+  it("a synced row with a Garmin activity", () => {
+    expect(canResync(row("success"))).toBe(true);
+  });
+
+  it("not without a Garmin activity", () => {
+    expect(canResync(row("success", null))).toBe(false);
+  });
+
+  it("not on a row marked as synced by hand, or skipped", () => {
+    expect(canResync(row("manual"))).toBe(false);
+    expect(canResync(row("skipped"))).toBe(false);
+  });
+
+  it("not on an in-flight row", () => {
+    expect(canResync(row("success", "4242", "pending"))).toBe(false);
   });
 });
