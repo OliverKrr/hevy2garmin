@@ -21,7 +21,7 @@
     "@types/libsodium-wrappers": "^0.7.14",
     "garmin-auth": "^0.7.4",
     "hash-wasm": "^4.12.0",
-    "hevy2garmin": "^0.12.0",
+    "hevy2garmin": "^0.13.0",
     "libsodium-wrappers": "^0.8.4",
     "next": "^16.4.0",
     "pg": "^8.23.0",
