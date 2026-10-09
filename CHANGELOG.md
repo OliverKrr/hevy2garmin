@@ -23,6 +23,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
 - The Docker section of the README mounts both folders for `init`, recommends named volumes, explains uid 999 for host folders, and tells docker-compose users how to reuse their old volumes (#651, #652).
 
+## [0.12.0 (npm)] - 2026-10-09
+
+### Added
+
+- `syncOneWorkout` takes `targetActivityId` with `targetHevyId` to resync a synced workout into the Garmin activity its ledger row stored, in place, with the merge's backup and read-back. Nothing is matched by time, uploaded or deleted. A stored activity Garmin no longer has returns `target_missing`. `GarminGateway` gains an optional `activity(id)` read (#701).
+
+### Fixed
+
+- `buildExerciseSetsPayload` ignores timing values that are not finite numbers, so an `undefined` no longer replaces a default and throws "Invalid time value" (#703).
+
 ## [0.11.1 (npm)] - 2026-10-08
 
 ### Fixed
