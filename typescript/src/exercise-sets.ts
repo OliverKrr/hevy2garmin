@@ -113,7 +113,14 @@ export function buildExerciseSetsPayload(
   customMappings?: Record<string, [number, number]>,
   timing?: Partial<SetTiming>,
 ): ExerciseSetsPayload {
-  const t: SetTiming = { ...DEFAULT_SET_TIMING, ...timing };
+  // Only real numbers override a default. A caller that builds the object from
+  // optional settings can pass `undefined` for a value the user never set, and
+  // spreading that over the default made every set time NaN, so the date
+  // conversion below threw "Invalid time value" (#703).
+  const t: SetTiming = { ...DEFAULT_SET_TIMING };
+  for (const [k, v] of Object.entries(timing ?? {})) {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) t[k as keyof SetTiming] = v;
+  }
   const exercises = workout.exercises ?? [];
   if (!exercises.length) return { activityId, exerciseSets: [] };
 
