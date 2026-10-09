@@ -8,6 +8,24 @@ export class HevyAuthError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * One entry from `GET /v1/workouts/events`. An `updated` event carries the
+ * workout as it now is. Other types, such as `deleted`, are passed through
+ * as Hevy sent them; their shape is not relied on here.
+ */
+export interface HevyWorkoutEvent {
+  type: string;
+  workout?: { id?: string; updated_at?: string; created_at?: string; [key: string]: unknown };
+  [key: string]: unknown;
+}
+
+/** One page of workout events. */
+export interface HevyWorkoutEventsPage {
+  events?: HevyWorkoutEvent[];
+  page?: number;
+  page_count?: number;
+}
+
 /** Injection points, so tests need not stub globals or actually wait. */
 export interface HevyClientOptions {
   fetchImpl?: typeof fetch;
@@ -123,6 +141,38 @@ export class HevyClient {
       page++;
     }
     return all;
+  }
+
+  /**
+   * One page of workout events since `since` (an ISO timestamp), newest
+   * first. Hevy reports a new workout as `updated` too, with `created_at`
+   * equal to `updated_at`. `pageSize` is at most 10.
+   */
+  getWorkoutEvents(since: string, page = 1, pageSize = 10): Promise<HevyWorkoutEventsPage> {
+    return this.get("/workouts/events", { page, pageSize, since });
+  }
+
+  /**
+   * Every workout event since `since`, newest first, up to `maxPages` pages.
+   *
+   * A failure THROWS, as in `getAllRoutines`: a fragment returned in its place
+   * would read as "nothing else changed". Stopping at `maxPages` is different,
+   * a limit the caller chose, so it returns what it has and says so with
+   * `truncated`, which is true only when Hevy had more pages to give.
+   */
+  async getWorkoutEventsSince(
+    since: string,
+    { maxPages = Infinity, pageSize = 10 }: { maxPages?: number; pageSize?: number } = {},
+  ): Promise<{ events: HevyWorkoutEvent[]; truncated: boolean }> {
+    const events: HevyWorkoutEvent[] = [];
+    for (let page = 1; ; page++) {
+      const d = await this.getWorkoutEvents(since, page, pageSize);
+      const batch = d.events ?? [];
+      events.push(...batch);
+      const lastPage = !batch.length || (d.page_count != null && page >= d.page_count);
+      if (lastPage) return { events, truncated: false };
+      if (page >= maxPages) return { events, truncated: true };
+    }
   }
 
   async getAllWorkouts(sincePage = 1, pageSize = 10): Promise<any[]> {
