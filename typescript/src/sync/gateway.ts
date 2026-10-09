@@ -66,9 +66,10 @@ export interface GarminGateway {
   dailyHeartRate?(date: string): Promise<Array<[number, number | null]>>;
   /**
    * READ: one activity by id, or null when Garmin no longer has it. A resync
-   * starts here, from the id the ledger stored, instead of searching by time.
-   * Optional so a consumer's own gateway keeps compiling; a resync through a
-   * gateway without it stops with an error.
+   * starts here, from the id the ledger stored, to learn that the activity
+   * still exists and on which day, instead of searching by time. Optional so a
+   * consumer's own gateway keeps compiling; a resync through a gateway without
+   * it stops with an error.
    */
   activity?(activityId: number): Promise<CandidateActivity | null>;
 }

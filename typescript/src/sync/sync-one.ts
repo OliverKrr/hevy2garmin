@@ -25,9 +25,9 @@
  * compute the decision, but NO claim, NO upload, NO finalize, NO ledger write.
  *
  * Resync (`targetActivityId`) turns layer 1 around and replaces layer 2: the
- * workout must already be synced, and its stored Garmin activity is read by id
- * instead of being searched for by time. It never reaches layer 3, because it
- * never uploads.
+ * workout must already be synced, and its stored Garmin activity is found by
+ * its id instead of being matched by time. It never reaches layer 3, because
+ * it never uploads.
  *
  * All IO goes through `SyncDeps`: the store, a lazily built Garmin gateway, and
  * the Hevy fetch. The engine itself is pure orchestration.
@@ -40,6 +40,7 @@ import { filterUnsynced } from "./dedup";
 import { generateDescription } from "./description";
 import { checkGracePeriod, DEFAULT_GRACE_MINUTES } from "./grace";
 import { isWatchRecorded, mergeIntoWatchActivity, pushSetsIntoActivity, type MergeOptions } from "./merge";
+import type { CandidateActivity } from "../merge-match";
 import type { GarminGateway, SyncDeps } from "./gateway";
 import type {
   CandidateWorkout,
@@ -92,6 +93,40 @@ function hrDeps(deps: SyncDeps, gateway: GarminGateway) {
             dailyHrToPoints(await gateway.dailyHeartRate!(start.toISOString().slice(0, 10)), start, end)
         : undefined),
   };
+}
+
+/**
+ * Heart rate for a resync, found without a single write.
+ *
+ * The stored activity's own FIT comes first, as it does for a replace, then the
+ * usual fallbacks, so the calories and average HR a resync writes are the ones
+ * a normal sync would. The backup and cache writers are left out: nothing is
+ * about to be deleted, and a resync changes only the activity and its ledger
+ * row.
+ *
+ * `hrForSync` refuses to fall back while a source activity is set, because for
+ * a replace that activity is about to be deleted. Here it is not, so that
+ * refusal is answered by asking again without one. HR is never a reason for a
+ * resync to fail.
+ */
+async function hrForResync(
+  workout: DedupWorkout,
+  deps: SyncDeps,
+  gateway: GarminGateway,
+  activityId: number,
+): Promise<HrPoint[] | null> {
+  const { saveBackup: _backup, saveCache: _cache, ...sources } = hrDeps(deps, gateway);
+  try {
+    return await hrForSync(workout, sources, { enabled: true, sourceActivityId: activityId });
+  } catch (err) {
+    if (!(err instanceof HRBackupError)) return null;
+    return hrForSync(workout, sources, { enabled: true }).catch(() => null);
+  }
+}
+
+/** YYYY-MM-DD, `days` from `d`, in UTC. */
+function isoDay(d: Date, days: number): string {
+  return new Date(d.getTime() + days * 86_400_000).toISOString().slice(0, 10);
 }
 
 function workoutView(w: DedupWorkout): SyncOneResult["workout"] {
@@ -254,12 +289,22 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
    */
   async function finishInPlace(
     activityId: number,
-    setsPushed: number,
-    fallbackReason: string | null = null,
-    syncMethod: "merge" | "upload" = "merge",
-    decision: DedupDecision = "existing_garmin_activity",
+    {
+      setsPushed,
+      fallbackReason = null,
+      syncMethod = "merge",
+      decision = "existing_garmin_activity",
+      hrSamples = null,
+    }: {
+      setsPushed: number;
+      fallbackReason?: string | null;
+      syncMethod?: "merge" | "upload";
+      decision?: DedupDecision;
+      /** HR to compute the calories and average from, as a normal sync's FIT would. */
+      hrSamples?: HrPoint[] | null;
+    },
   ): Promise<SyncOneResult> {
-    const stats = fitStatsOf(generateFit(picked as unknown as FitWorkout, null, { profile }));
+    const stats = fitStatsOf(generateFit(picked as unknown as FitWorkout, hrSamples, { profile }));
     await gateway.rename(activityId, title);
     if (descriptionEnabled) {
       await gateway.describe(activityId, generateDescription(picked, stats.calories, stats.avgHr));
@@ -290,9 +335,9 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
   }
 
   // 1b) RESYNC. The activity is the one the ledger stored, so everything below
-  //     is skipped: the merge's search, the HR fetch, the start-time lookup,
-  //     the claim and the upload. There is nothing to look for and nothing to
-  //     upload, and the HR the activity has is the HR it keeps.
+  //     is skipped: the merge's search, the start-time lookup, the claim and
+  //     the upload. There is nothing to match and nothing to upload, and the
+  //     HR the activity has is the HR it keeps.
   if (resyncActivityId != null) {
     const failed = (error: string): SyncOneResult => ({
       ...emptyResult(dryRun, "stored_activity", remaining),
@@ -303,9 +348,10 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
     });
     if (!gateway.activity) return failed("this Garmin gateway cannot read an activity by id");
 
-    // A READ, so a dry run makes it too and can report a missing activity.
-    const activity = await gateway.activity(resyncActivityId);
-    if (!activity) {
+    // Whether the activity still exists, and on which day. READS, so a dry run
+    // makes them too and can report a missing or unidentifiable activity.
+    const stored = await gateway.activity(resyncActivityId);
+    if (!stored) {
       return {
         ...emptyResult(dryRun, "stored_activity", remaining),
         status: "target_missing",
@@ -313,7 +359,29 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
         existingGarminActivityId: resyncActivityId,
       };
     }
-    const syncMethod = isWatchRecorded(activity) ? "merge" : "upload";
+
+    // What it is, from its own entry in Garmin's activity list: whether a
+    // watch recorded it, and the start and duration the sets are laid out on.
+    // That listing is the shape a merge has always read, so nothing here rests
+    // on the single-activity response's field names beyond its start. The
+    // entry is picked by id alone. One that is not listed is an error, never a
+    // reason to take whatever else sits at that time.
+    const day = toUtcDate(stored.startTimeGMT || stored.startTimeLocal || "") ?? toUtcDate(startTime);
+    if (!day) return failed(`could not tell which day Garmin activity ${resyncActivityId} is on`);
+    let listing: CandidateActivity[];
+    try {
+      listing = await gateway.activitiesByDate(isoDay(day, -1), isoDay(day, 1));
+    } catch (e) {
+      return failed(`could not list Garmin activities: ${(e as Error).message}`);
+    }
+    const activity = (listing ?? []).find((a) => String(a.activityId) === String(resyncActivityId));
+    if (!activity) {
+      return failed(
+        `Garmin activity ${resyncActivityId} exists but is not in Garmin's activity list around ${isoDay(day, 0)}, so it could not be identified`,
+      );
+    }
+    const isWatch = isWatchRecorded(activity);
+    const syncMethod = isWatch ? "merge" : "upload";
 
     if (dryRun) {
       return {
@@ -331,8 +399,11 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       };
     }
 
+    // `describe` keeps a watch recording's own sets. Our own upload has none
+    // of the watch's to keep, only the sets of the version it was made from,
+    // so those are replaced whatever the strategy.
     let setsPushed = 0;
-    if (!(merge.enabled && mergeOptions.strategy === "describe")) {
+    if (!(merge.enabled && mergeOptions.strategy === "describe" && isWatch)) {
       // Pushed as a `merge`, which here means only "keep this activity". The
       // read-back then follows the activity rather than the setting: a watch
       // recording is not read back, as in a normal merge, and our own upload
@@ -355,7 +426,16 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       }
       setsPushed = outcome.setsPushed ?? 0;
     }
-    return finishInPlace(resyncActivityId, setsPushed, null, syncMethod, "stored_activity");
+
+    // Live only, and only once the sets are in, because nothing after a failed
+    // push uses it. Respects `hr_fusion` as the normal path does.
+    const hrSamples = hrFusion ? await hrForResync(picked, deps, gateway, resyncActivityId) : null;
+    return finishInPlace(resyncActivityId, {
+      setsPushed,
+      syncMethod,
+      decision: "stored_activity",
+      hrSamples,
+    });
   }
 
   // 2) MERGE. Live path only — merging writes to an activity the user already
@@ -367,7 +447,7 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
   if (!dryRun && merge.enabled) {
     const outcome = await mergeIntoWatchActivity(gateway, workout, mergeOptions, { store });
     if (outcome.merged && outcome.activityId != null) {
-      return finishInPlace(outcome.activityId, outcome.setsPushed ?? 0);
+      return finishInPlace(outcome.activityId, { setsPushed: outcome.setsPushed ?? 0 });
     }
     mergeFallbackReason = outcome.reason ?? null;
     // Merge-only, and the merge found no activity at all: the watch recording
@@ -441,7 +521,10 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
         { store },
       );
       if (inPlace.merged && inPlace.activityId != null) {
-        return finishInPlace(inPlace.activityId, inPlace.setsPushed ?? 0, err.message);
+        return finishInPlace(inPlace.activityId, {
+          setsPushed: inPlace.setsPushed ?? 0,
+          fallbackReason: err.message,
+        });
       }
       // Even that failed. Keep the watch activity and upload alongside it, so
       // the workout still syncs and nothing the user had is lost.
@@ -564,9 +647,7 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
     const from = toUtcDate(start);
     const to = toUtcDate(end) ?? from;
     if (from && to) {
-      const day = (d: Date, off: number) =>
-        new Date(d.getTime() + off * 86_400_000).toISOString().slice(0, 10);
-      const snapshot = await gateway.activitiesByDate(day(from, -1), day(to, 1));
+      const snapshot = await gateway.activitiesByDate(isoDay(from, -1), isoDay(to, 1));
       snapshotIds = snapshot
         .map((a) => (a as { activityId?: number | string }).activityId)
         .filter((id): id is number | string => id != null)

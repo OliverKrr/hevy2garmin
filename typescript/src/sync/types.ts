@@ -174,13 +174,22 @@ export interface SyncOneOptions {
   /**
    * Resync: push the current Hevy version of `targetHevyId`, which must
    * already be synced, into this Garmin activity, the one its ledger row
-   * stored. It replaces the start-time lookup, so nothing is searched for by
+   * stored. It replaces the start-time lookup, so nothing is matched by
    * time, uploaded or deleted, and no claim is taken.
+   *
+   * The activity is read by id to learn that it exists and on which day, then
+   * identified by that id in Garmin's activity list for the day, which says
+   * whether a watch recorded it and gives the start and duration the sets are
+   * laid out on. One that is not in that list is an error.
    *
    * The sets are pushed with the same backup and read-back as a merge, then
    * the activity is renamed and described and the ledger row rewritten. Under
-   * the `describe` watch strategy only the name and description change. A
-   * `replace` activity is our own named upload by now and is treated as one.
+   * the `describe` watch strategy a watch recording keeps its own sets and
+   * only the name and description change; our own upload gets the sets too.
+   * A `replace` activity is our own named upload by now and is treated as
+   * one. With `hrFusion` on, heart rate is read from the activity's own FIT
+   * and then the usual fallbacks, writing nothing, so the calories and average
+   * HR match a normal sync's; without any, the resync goes on without it.
    *
    * Every outcome other than `synced` and `dry_run` leaves Garmin and the
    * ledger as they were. `target_missing` means Garmin no longer has the

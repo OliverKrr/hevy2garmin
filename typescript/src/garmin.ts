@@ -192,7 +192,8 @@ interface ActivityDetail {
 
 /**
  * One activity by id, in the shape the merge matcher reads, or null when
- * Garmin answers 404.
+ * Garmin answers 404. A resync takes only its existence and its start from
+ * this; everything else it needs comes from the activity list.
  *
  * The 404 is the one answer that means the activity is gone, so it is the only
  * one turned into null. Anything else says nothing about whether the activity
