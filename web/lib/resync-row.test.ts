@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canResync, resyncOutcome } from "./resync-row";
+import { canResync, editedAfterResync, resyncOutcome, showsEditedBadge } from "./resync-row";
 
 /**
  * What a workout row says after Resync (#701). Three outcomes the user acts on
@@ -66,5 +66,46 @@ describe("canResync", () => {
 
   it("not on an in-flight row", () => {
     expect(canResync(row("success", "4242", "pending"))).toBe(false);
+  });
+});
+
+/**
+ * The "Edited in Hevy" badge (#701): shown on a row the edited list names,
+ * where Resync is offered, and gone once a resync of that row succeeds.
+ */
+describe("showsEditedBadge", () => {
+  const synced = { kind: "terminal", state: "success", garmin_activity_id: "4242", hevy_id: "w1" };
+
+  it("shows on a listed row that offers Resync", () => {
+    expect(showsEditedBadge(synced, new Set(["w1"]))).toBe(true);
+  });
+
+  it("not on a row the list does not name", () => {
+    expect(showsEditedBadge(synced, new Set(["w2"]))).toBe(false);
+    expect(showsEditedBadge(synced, new Set())).toBe(false);
+  });
+
+  it("not on a listed row that does not offer Resync", () => {
+    expect(showsEditedBadge({ ...synced, state: "manual" }, new Set(["w1"]))).toBe(false);
+    expect(showsEditedBadge({ ...synced, kind: "pending" }, new Set(["w1"]))).toBe(false);
+  });
+});
+
+describe("editedAfterResync", () => {
+  const edited = new Set(["w1", "w2"]);
+
+  it("clears the row's badge after a successful resync", () => {
+    const after = editedAfterResync(edited, "w1", { kind: "success", text: "Resynced from Hevy." });
+    expect([...after]).toEqual(["w2"]);
+  });
+
+  it("keeps it when the resync did not succeed", () => {
+    expect(editedAfterResync(edited, "w1", { kind: "error", text: "boom" })).toBe(edited);
+    expect(editedAfterResync(edited, "w1", { kind: "missing", text: "gone" })).toBe(edited);
+  });
+
+  it("leaves the set it was given unchanged", () => {
+    editedAfterResync(edited, "w1", { kind: "success", text: "ok" });
+    expect([...edited]).toEqual(["w1", "w2"]);
   });
 });
