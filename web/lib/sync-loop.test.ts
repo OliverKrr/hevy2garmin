@@ -5,6 +5,7 @@ import {
   classifyError,
   loopPercent,
   errorHint,
+  errorText,
   type LoopState,
 } from "./sync-loop";
 
@@ -101,5 +102,32 @@ describe("stepLoop — termination branches", () => {
 describe("loopPercent", () => {
   it("is 0 before the total is known", () => {
     expect(loopPercent(initialLoopState)).toBe(0);
+  });
+});
+
+describe("errorText", () => {
+  // #715: the generic hint used to replace the server message, so a failed
+  // run said only "Something went wrong" and nobody could tell what failed.
+  it("keeps the server message for a generic error", () => {
+    const { state } = stepLoop(initialLoopState, { httpStatus: 504, result: {} });
+    expect(errorText(state.errorKind!, state.message)).toBe(
+      "Something went wrong during the sync. Sync failed (504).",
+    );
+  });
+
+  it("keeps the engine's error text for a generic error", () => {
+    const { state } = stepLoop(initialLoopState, ok({ status: "error", error: "Hevy API returned 429" }));
+    expect(errorText(state.errorKind!, state.message)).toBe(
+      "Something went wrong during the sync. Hevy API returned 429",
+    );
+  });
+
+  it("shows only the actionable hint for the known kinds", () => {
+    const { state } = stepLoop(initialLoopState, ok({ status: "error", error: "Garmin requires upload consent" }));
+    expect(errorText(state.errorKind!, state.message)).toBe(errorHint("consent"));
+  });
+
+  it("falls back to the hint when there is no message", () => {
+    expect(errorText("generic", null)).toBe(errorHint("generic"));
   });
 });

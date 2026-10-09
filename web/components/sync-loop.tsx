@@ -6,7 +6,7 @@ import {
   initialLoopState,
   stepLoop,
   loopPercent,
-  errorHint,
+  errorText,
   type LoopState,
   type SyncOneLike,
 } from "@/lib/sync-loop";
@@ -165,7 +165,7 @@ export function SyncLoop({ ready }: { ready: boolean }) {
           </div>
           {state.done && state.message && (
             <p className={`mt-2 text-xs ${state.errorKind ? "text-danger" : "text-text-secondary"}`} role={state.errorKind ? "alert" : undefined}>
-              {state.errorKind ? errorHint(state.errorKind) : state.message}
+              {state.errorKind ? errorText(state.errorKind, state.message) : state.message}
             </p>
           )}
         </div>

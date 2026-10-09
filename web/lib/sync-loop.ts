@@ -133,3 +133,15 @@ export function errorHint(kind: ErrorKind): string {
       return "Something went wrong during the sync.";
   }
 }
+
+/**
+ * What the panel says when a run stops on an error. The three known kinds have
+ * a hint that tells the user what to do, so the raw text adds nothing. The
+ * generic kind has no such hint, and the server message is the only clue to
+ * what failed, so it stays (#715).
+ */
+export function errorText(kind: ErrorKind, message: string | null): string {
+  const hint = errorHint(kind);
+  if (kind !== "generic" || !message) return hint;
+  return `${hint} ${message}`;
+}
