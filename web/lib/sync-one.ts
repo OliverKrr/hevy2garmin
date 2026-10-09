@@ -78,7 +78,14 @@ export function buildSyncDeps(sql: Sql, options: SyncOneOptions = {}): SyncDeps 
       // Applied HERE, before the engine sees the list, so listCandidates and
       // syncOneWorkout both honour it without being told and without the engine
       // needing a release (#647).
-      const startDate = parseStartDate(await loadSyncStartDate(sql).catch(() => null));
+      //
+      // Not for a resync. The date chooses which workouts are sync candidates,
+      // and a resync's workout is already synced, possibly before the date was
+      // set. Hiding it would leave the engine nothing to resync from.
+      const startDate =
+        options.targetActivityId != null
+          ? null
+          : parseStartDate(await loadSyncStartDate(sql).catch(() => null));
       const workouts = withinSyncWindow(all, startDate);
       // The HR backup is looked up by id against the FULL list on purpose: a
       // workout outside the window is not a candidate, but one that was synced

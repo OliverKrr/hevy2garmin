@@ -34,6 +34,10 @@ vi.mock("hevy2garmin", async (importOriginal) => ({
 }));
 vi.mock("@/lib/sync-lock-store", () => ({ postgresLockBackend: () => ({}) }));
 
+const getWorkout = vi.fn();
+vi.mock("@/lib/hevy-sync", () => ({ getHevyClient: async () => ({ getWorkout }) }));
+const OLD_WORKOUT = { id: "w9", title: "Before the sync start date", start_time: "2024-01-01T10:00:00Z" };
+
 import { POST } from "./route";
 
 const params = (id: string) => ({ params: Promise.resolve({ hevyId: id }) });
@@ -53,6 +57,7 @@ beforeEach(() => {
   cookieGet.mockReturnValue(undefined);
   syncOneWorkout.mockResolvedValue({ status: "dry_run", dryRun: true, dedupDecision: "would_upload" });
   storedGarminActivityId.mockResolvedValue("4242");
+  getWorkout.mockResolvedValue(OLD_WORKOUT);
   acquireSyncLock.mockResolvedValue({ key: "sync", token: "t", release });
 });
 
@@ -101,6 +106,10 @@ describe("POST /api/sync/[hevyId] with resync", () => {
     verifySession.mockReturnValue(true);
   };
   const resync = (url = "http://h/api/sync/w9?live=1") => POST(req(url, { resync: true }), params("w9"));
+  /** The options the engine was last called with. */
+  const engineOptions = () => syncOneWorkout.mock.calls.at(-1)![1] as Record<string, unknown> & {
+    fetchWorkouts: () => Promise<unknown[]>;
+  };
 
   it("no live → a dry-run resync into the stored activity, without the lock", async () => {
     syncOneWorkout.mockResolvedValue({ status: "dry_run", dryRun: true, dedupDecision: "stored_activity" });
@@ -111,6 +120,7 @@ describe("POST /api/sync/[hevyId] with resync", () => {
       dryRun: true,
       targetHevyId: "w9",
       targetActivityId: 4242,
+      fetchWorkouts: expect.any(Function),
     });
     expect(acquireSyncLock).not.toHaveBeenCalled();
     expect(recordSyncRun).not.toHaveBeenCalled();
@@ -132,6 +142,7 @@ describe("POST /api/sync/[hevyId] with resync", () => {
       dryRun: false,
       targetHevyId: "w9",
       targetActivityId: 4242,
+      fetchWorkouts: expect.any(Function),
     });
     expect(acquireSyncLock).toHaveBeenCalledWith(expect.objectContaining({ key: "sync" }));
     expect(release).toHaveBeenCalledOnce();
@@ -176,6 +187,35 @@ describe("POST /api/sync/[hevyId] with resync", () => {
     syncOneWorkout.mockRejectedValue(new Error("boom"));
     await resync();
     expect(unsync).not.toHaveBeenCalled();
+  });
+
+  it("hands the engine the one workout fetched from Hevy, whatever its date", async () => {
+    // Fetched by id rather than from the list, which the sync start date cuts
+    // short: a workout synced before that date was set must still resync.
+    live();
+    syncOneWorkout.mockResolvedValue({ status: "synced", dryRun: false, dedupDecision: "stored_activity" });
+    await resync();
+    expect(getWorkout).toHaveBeenCalledWith("w9");
+    expect(await engineOptions().fetchWorkouts()).toEqual([OLD_WORKOUT]);
+  });
+
+  it("a workout Hevy does not have → 404 saying so, engine not called", async () => {
+    live();
+    getWorkout.mockResolvedValue(null);
+    const res = await resync();
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("Workout not found on Hevy.");
+    expect(syncOneWorkout).not.toHaveBeenCalled();
+    expect(acquireSyncLock).not.toHaveBeenCalled();
+  });
+
+  it("no Hevy key → 500 with the reason, engine not called", async () => {
+    live();
+    getWorkout.mockRejectedValue(new Error("No Hevy API key available"));
+    const res = await resync();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/No Hevy API key/);
+    expect(syncOneWorkout).not.toHaveBeenCalled();
   });
 
   it("no stored Garmin activity → 404, engine not called", async () => {

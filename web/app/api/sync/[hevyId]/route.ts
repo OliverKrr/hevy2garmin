@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { syncOneWorkout } from "@/lib/sync-one";
 import { getDb } from "@/lib/db";
 import { acquireSyncLock, recordSyncRun } from "hevy2garmin";
+import { getHevyClient, type HevyWorkout } from "@/lib/hevy-sync";
 import { storedGarminActivityId } from "@/lib/pending-store";
 import { postgresSyncStore } from "@/lib/sync-store";
 import { postgresLockBackend } from "@/lib/sync-lock-store";
@@ -57,6 +58,10 @@ function asksFor(request: Request, body: Record<string, unknown>, flag: "live" |
  * nothing. That is turned into an error here rather than passed on as a
  * result, so it can never read as a resync that worked.
  *
+ * The workout is fetched from Hevy by id and handed to the engine as the only
+ * workout, rather than taken from the full list, which the sync start date
+ * cuts short. A workout synced before that date was set must still resync.
+ *
  * A live resync takes the sync lock, like the other routes that write to
  * Garmin, so it cannot run alongside a batch working on the same activities.
  */
@@ -70,6 +75,16 @@ async function resync(sql: ReturnType<typeof getDb>, hevyId: string, dryRun: boo
     );
   }
 
+  const workout = await getHevyClient()
+    .then((hevy) => hevy.getWorkout(hevyId) as Promise<HevyWorkout | null>)
+    .catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
+  if (workout instanceof Error) {
+    return NextResponse.json({ error: workout.message }, { status: 500 });
+  }
+  if (!workout) {
+    return NextResponse.json({ error: "Workout not found on Hevy." }, { status: 404 });
+  }
+
   const lock = dryRun ? null : await acquireSyncLock({ backend: postgresLockBackend(sql), key: "sync" });
   if (!dryRun && !lock) {
     return NextResponse.json(
@@ -79,7 +94,12 @@ async function resync(sql: ReturnType<typeof getDb>, hevyId: string, dryRun: boo
   }
 
   try {
-    const result = await syncOneWorkout(sql, { dryRun, targetHevyId: hevyId, targetActivityId: activityId });
+    const result = await syncOneWorkout(sql, {
+      dryRun,
+      targetHevyId: hevyId,
+      targetActivityId: activityId,
+      fetchWorkouts: async () => [workout],
+    });
     if (result.status === "none" || result.dedupDecision === "no_candidates") {
       return NextResponse.json(
         { error: "This engine version does not support resync yet. Nothing was changed." },
