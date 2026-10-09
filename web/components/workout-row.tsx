@@ -317,7 +317,7 @@ export function WorkoutRow({
             {item.detail && <span className="text-text-secondary"> · {item.detail}</span>}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {canResolve && (
             <button type="button" onClick={() => setResolving((v) => !v)} className={actionBtn}>
               {resolving ? "Cancel" : "Resolve"}
@@ -330,7 +330,7 @@ export function WorkoutRow({
           )}
           {edited && (
             <span
-              className="inline-block rounded-full bg-warm/15 px-2.5 py-0.5 text-xs font-medium text-warm"
+              className="inline-block whitespace-nowrap rounded-full bg-warm/15 px-2.5 py-0.5 text-xs font-medium text-warm"
               title="Changed in Hevy after it synced. Resync to update Garmin."
             >
               Edited in Hevy
