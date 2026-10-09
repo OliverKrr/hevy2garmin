@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="80" height="80" alt="hevy2garmin logo">
+  <img src="docs/images/banner.png" width="100%" alt="hevy2garmin">
 </p>
 
 <h1 align="center">hevy2garmin</h1>
