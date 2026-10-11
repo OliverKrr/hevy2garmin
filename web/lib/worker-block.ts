@@ -3,7 +3,7 @@
  *
  * With H2G_DIRECT_GARMIN_LOGIN on, no request from this server may reach a
  * Cloudflare Worker (*.workers.dev), whichever code path makes it. The login
- * routes already never call one (lib/garmin-direct-login.ts); this catches the
+ * routes already never call one (lib/garmin-login-worker.ts); this catches the
  * paths nobody has reviewed yet, such as one an upstream rebase adds. It wraps
  * the global fetch once at server start (instrumentation.ts) and throws before
  * any byte leaves the process. The browser half is the Content-Security-Policy
