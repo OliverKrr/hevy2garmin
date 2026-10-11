@@ -60,8 +60,31 @@ export async function getGarminClient(databaseUrl?: string): Promise<GarminClien
   try { await normalizeGarminTokenRow(getDb()); } catch { /* no DB handle: DBTokenStore reports it */ }
   const store = new DBTokenStore(url, GARMIN_TOKEN_PLATFORM);
   const auth = new GarminAuth({ store });
-  cachedClient = await auth.client();
+  const client = await auth.client();
+  persistRefreshes(client, store);
+  cachedClient = client;
   return cachedClient;
+}
+
+/**
+ * Save the tokens after every refresh of the DI token, wherever it happens.
+ *
+ * Garmin rotates the refresh token on each refresh, so the one in the store stops working the
+ * moment the client refreshes. GarminAuth saves only after its own startup check; the client is
+ * cached for the life of the process and refreshes on a 401 deep inside a sync or a delete, a day
+ * after that check. Unsaved, the next process start loads the replaced refresh token, Garmin
+ * rejects it, and the user has to sign in again with MFA. A failed save throws, as GarminAuth's
+ * own save does: a refreshed token that was not kept is a storage fault, not a passing one.
+ */
+export function persistRefreshes(
+  client: Pick<GarminClient, "refreshDiToken" | "dumps">,
+  store: Pick<DBTokenStore, "save">,
+): void {
+  const refresh = client.refreshDiToken.bind(client);
+  client.refreshDiToken = async () => {
+    await refresh();
+    await store.save(client.dumps());
+  };
 }
 
 /** Reset the cached client (test seam / after a token rotation). */
