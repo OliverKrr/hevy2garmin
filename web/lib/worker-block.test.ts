@@ -108,7 +108,8 @@ describe("inventory of Worker addresses (fails on a new one)", () => {
   const WEB = join(__dirname, "..");
   const SCAN = ["app", "components", "lib", "proxy.ts", "instrumentation.ts", "next.config.ts",
     "node_modules/garmin-auth/dist", "node_modules/hevy2garmin/dist"];
-  const SKIP = /\.test\.|\/garmin-sso-local\/worker\.js$/;
+  // garmin-auth's compiled Worker (dist/sso-worker-handler.js) is scanned too: it names no Worker.
+  const SKIP = /\.test\./;
 
   function files(p: string): string[] {
     const abs = join(WEB, p);
