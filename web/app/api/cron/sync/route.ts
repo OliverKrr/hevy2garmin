@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { syncOneWorkout, type SyncOneResult } from "@/lib/sync-one";
+import { repeatsEarlierRun } from "@/lib/sync-progress";
 import { postgresSyncStore } from "@/lib/sync-store";
 import { recordSyncRun } from "hevy2garmin";
 import { getDb } from "@/lib/db";
@@ -66,6 +67,7 @@ export async function GET(request: Request) {
   }
 
   const runs: SyncOneResult[] = [];
+  const seen = new Set<string>();
   try {
     for (let i = 0; i < CAP; i++) {
       // respectGrace: nobody is watching this run, so a workout that just
@@ -73,6 +75,9 @@ export async function GET(request: Request) {
       // becoming a second copy of the same session.
       const r = await syncOneWorkout(sql, { dryRun: false, respectGrace: true });
       if (r.status === "none") break;
+      // A workout already handled in this run came back: it is still pending (deferred), so
+      // nothing more will move until the next run (#723).
+      if (repeatsEarlierRun(seen, r)) break;
       runs.push(r);
       // Only a hard error stops the run. One refused or unresolved workout must
       // not cancel the rest of the backlog, which is how the Python loop

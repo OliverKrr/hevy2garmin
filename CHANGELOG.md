@@ -18,6 +18,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The sync cron and the dashboard's batch sync stop when the engine hands back a workout the run already handled. A deferred workout stays pending, so the loop used to repeat it up to its cap of 50: a cron tick inside the grace period ran 50 identical passes, each fetching the Hevy list (#723).
 - A sync that merged into a watch activity failed with "Invalid time value" (shown as "Something went wrong during the sync.") when the Timing settings were never saved. The settings loader passed `undefined` for each unsaved value, which replaced the default set time with NaN. It now passes only saved values, and the engine ignores any timing value that is not a number (#703).
 - The setup page and the dashboard showed Hevy as "Not connected" when the key came from `HEVY_API_KEY`, though the sync used it. The badge now counts a key from the environment or the saved row, and a key Hevy rejected still shows as disconnected: for an environment key, which has no row to mark, a row holding only the status is written, never the key (#681).
 - The webhook compares the `CRON_SECRET` bearer in constant time (#656).

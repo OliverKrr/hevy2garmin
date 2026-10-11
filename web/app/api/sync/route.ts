@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { syncOneWorkout, type SyncOneResult } from "@/lib/sync-one";
+import { repeatsEarlierRun } from "@/lib/sync-progress";
 import { postgresSyncStore } from "@/lib/sync-store";
 import { recordSyncRun } from "hevy2garmin";
 import { getDb } from "@/lib/db";
@@ -141,10 +142,14 @@ export async function POST(request: Request) {
 
   // Live, local/self-hosted: loop the tested single-workout engine.
   const runs: SyncOneResult[] = [];
+  const seen = new Set<string>();
   try {
     for (let i = 0; i < CAP; i++) {
       const r = await syncOneWorkout(sql, { dryRun: false });
       if (r.status === "none") break; // no candidates left
+      // A workout already handled in this run came back: it is still pending (deferred), so
+      // nothing more will move until the next run (#723).
+      if (repeatsEarlierRun(seen, r)) break;
       runs.push(r);
       // Only a hard error stops the batch. A refused import (`failed`) or an
       // unknown outcome (`processing`) is about that one workout, so the run

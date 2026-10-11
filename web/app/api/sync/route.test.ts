@@ -129,6 +129,17 @@ describe("POST /api/sync — batch", () => {
     expect(syncOneWorkout).toHaveBeenCalledTimes(2); // stopped after the error
   });
 
+  it("inline loop stops when a deferred workout comes back", async () => {
+    authEnabled.mockReturnValue(false);
+    syncOneWorkout
+      .mockResolvedValueOnce({ status: "synced", remaining: 2, workout: { hevy_id: "a" } })
+      .mockResolvedValue({ status: "deferred", remaining: 1, workout: { hevy_id: "b" } });
+    const json = await (await POST(req("http://h/api/sync?live=1", {}))).json();
+    expect(json.ran).toBe(2);
+    expect(json.totalSynced).toBe(1);
+    expect(syncOneWorkout).toHaveBeenCalledTimes(3); // a, b, and b again, which ends the run
+  });
+
   it("invalid JSON → 400", async () => {
     const bad = new Request("http://h/api/sync", {
       method: "POST",
