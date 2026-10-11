@@ -342,6 +342,10 @@ The compose file starts three containers:
 
 To run the image without compose, build it with `docker build -t hevy2garmin-web web/` and pass the same variables with `-e`, pointing `DATABASE_URL` at your Postgres. The image builds and runs on amd64 and arm64. Build it on the machine that runs it: an emulated cross-build under QEMU crashes in Next's build step. To have `/api/version` report the commit you built, set `HEVY2GARMIN_COMMIT_SHA` when you start the container.
 
+### Signing in to Garmin without the Worker
+
+The setup page signs in to Garmin through the shared Cloudflare Worker, because Garmin blocks its sign-in from cloud servers. A self-hosted server on a home connection usually is not blocked. Set `H2G_DIRECT_GARMIN_LOGIN=true` and it runs the Worker's own code in its process instead (`garmin-auth/sso-local`): your email, password, two-factor code and a pasted sign-in ticket then go from your server to Garmin and nowhere else, and `GARMIN_LOGIN_WORKER_URL` is ignored. The two-factor step is held in memory between the password and the code, so this needs one long-running process, which the Docker image is; it does not work on serverless. With Docker, add it under the `web` service's `environment`.
+
 ### Under a sub-path
 
 To serve the dashboard under a path such as `https://example.com/tools/hevy2garmin` instead of a subdomain, set `H2G_BASE_PATH=/tools/hevy2garmin` when you **build**: Next.js bakes the base path into the bundle, so `npm run build` (or the image) has to be made for the path it is served under. The proxy then forwards the full path, prefix included. Forward the app's root as the bare `/tools/hevy2garmin`, not `/tools/hevy2garmin/`: Next.js redirects the slashed form to the bare one, so a proxy that maps the bare form back to the slashed one loops.
